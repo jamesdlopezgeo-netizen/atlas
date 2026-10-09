@@ -1,0 +1,148 @@
+{
+  "format": "allocycle.package/v1",
+  "notice": "Prototype. Not a registry submission.",
+  "scope": "allocycle does not score the credit, quantify tons, or submit to a registry.",
+  "record_id": "sample-issued",
+  "face": "isometric",
+  "status": "issued",
+  "status_note": "Issued package. The record carries an \"Approved for use\" event by a named person, sealed before this package was issued.",
+  "cover_sheet": {
+    "face": "Isometric",
+    "default_face": true,
+    "labeling": [
+      "G-K6MR-0",
+      "G-6VGD-0"
+    ],
+    "project_name": "Sample: Basin Ridge DAC Pilot",
+    "project_id": "SAMPLE-DAC-0042",
+    "protocol": "Direct air capture protocol (sample)",
+    "batch": "Batch 2026-Q2-07"
+  },
+  "outline": {
+    "source": {
+      "ai_system": "Plume dispersion surrogate",
+      "version": "2.3.1",
+      "artifact_hash": "3b5f66bfba46158072622cc9cdec81598d20eb3210472d8e6fab29529cff35c7"
+    },
+    "modifications": [
+      {
+        "seq": 3,
+        "sealed_at": "2026-07-05T16:20:03Z",
+        "field": "data_snapshot_hash",
+        "previous": "bb6a7ddebe17972becd70cc4b82ad731f4376a111950675c62144023c68b1ff2",
+        "value": "005d2d26c975a9a7ed2fc3e4945f7c1a5e1ec18784545e7c94f759a4ddae917a",
+        "reason": "The team re-exported the data snapshot after a time-zone fix. Line 2 stays as it was; this line records the change.",
+        "autogenic_reference": "Project team internal log, entry 14 (sample)"
+      }
+    ],
+    "inputs": {
+      "description": "Met-tower wind fields; contactor exhaust temperature and flow; site boundary polygon"
+    },
+    "data": {
+      "snapshot_hash": "005d2d26c975a9a7ed2fc3e4945f7c1a5e1ec18784545e7c94f759a4ddae917a"
+    },
+    "validation": {
+      "type": "peer-review",
+      "summary": "Surrogate compared with 14 held-out full dispersion runs; all 14 within the stated screening envelope.",
+      "reference": "Project team validation memo VM-07 (sample)"
+    },
+    "named_approval": {
+      "seq": 4,
+      "person": "M. Ortega (sample)",
+      "role": "Model risk lead, project team",
+      "approved_at": "2026-07-08T11:00:00Z",
+      "intended_use": "Screening support for plume checks on batch 2026-Q2-07. Not used to quantify removals."
+    },
+    "batch_binding": {
+      "project_name": "Sample: Basin Ridge DAC Pilot",
+      "project_id": "SAMPLE-DAC-0042",
+      "registry_face": "isometric",
+      "protocol": "Direct air capture protocol (sample)",
+      "batch": "Batch 2026-Q2-07",
+      "bound_at_seq": 1,
+      "registered_event_hash": "bcae99bf142ae32968e08dbc301cd691957b648d6ac92f9a13fd4620bdfbd387"
+    }
+  },
+  "concerns": [],
+  "events": [
+    {
+      "seq": 1,
+      "type": "Registered",
+      "sealed_at": "2026-07-01T14:02:11Z",
+      "recorded_by": "allocycle (external record)",
+      "payload": {
+        "claim": {
+          "project_name": "Sample: Basin Ridge DAC Pilot",
+          "project_id": "SAMPLE-DAC-0042",
+          "registry_face": "isometric",
+          "protocol": "Direct air capture protocol (sample)",
+          "batch": "Batch 2026-Q2-07"
+        },
+        "ai_system": "Plume dispersion surrogate",
+        "version": "2.3.1",
+        "artifact_hash": "3b5f66bfba46158072622cc9cdec81598d20eb3210472d8e6fab29529cff35c7",
+        "inputs": "Met-tower wind fields; contactor exhaust temperature and flow; site boundary polygon"
+      },
+      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "hash": "bcae99bf142ae32968e08dbc301cd691957b648d6ac92f9a13fd4620bdfbd387"
+    },
+    {
+      "seq": 2,
+      "type": "Validated",
+      "sealed_at": "2026-07-03T09:41:50Z",
+      "recorded_by": "allocycle (external record)",
+      "payload": {
+        "data_snapshot_hash": "bb6a7ddebe17972becd70cc4b82ad731f4376a111950675c62144023c68b1ff2",
+        "validation_type": "hold-out",
+        "summary": "Surrogate compared with 14 held-out full dispersion runs; all 14 within the stated screening envelope.",
+        "reference": "Project team validation memo VM-07 (sample)"
+      },
+      "prev_hash": "bcae99bf142ae32968e08dbc301cd691957b648d6ac92f9a13fd4620bdfbd387",
+      "hash": "ba690cb16df919f697ae55073ea788f1264aaf5d452ee79345158ac58bcb2b9c"
+    },
+    {
+      "seq": 3,
+      "type": "Correction",
+      "sealed_at": "2026-07-05T16:20:03Z",
+      "recorded_by": "allocycle (external record)",
+      "payload": {
+        "field": "data_snapshot_hash",
+        "previous": "bb6a7ddebe17972becd70cc4b82ad731f4376a111950675c62144023c68b1ff2",
+        "value": "005d2d26c975a9a7ed2fc3e4945f7c1a5e1ec18784545e7c94f759a4ddae917a",
+        "reason": "The team re-exported the data snapshot after a time-zone fix. Line 2 stays as it was; this line records the change.",
+        "autogenic_reference": "Project team internal log, entry 14 (sample)"
+      },
+      "prev_hash": "ba690cb16df919f697ae55073ea788f1264aaf5d452ee79345158ac58bcb2b9c",
+      "hash": "58f74a9a8d540b27b5cdd16af5526afc64e06bc66b5e28ef7b5e58a77ff32654"
+    },
+    {
+      "seq": 4,
+      "type": "Approved for use",
+      "sealed_at": "2026-07-08T11:05:27Z",
+      "recorded_by": "allocycle (external record)",
+      "payload": {
+        "person": "M. Ortega (sample)",
+        "role": "Model risk lead, project team",
+        "approved_at": "2026-07-08T11:00:00Z",
+        "intended_use": "Screening support for plume checks on batch 2026-Q2-07. Not used to quantify removals."
+      },
+      "prev_hash": "58f74a9a8d540b27b5cdd16af5526afc64e06bc66b5e28ef7b5e58a77ff32654",
+      "hash": "18c0fef417871872d26615fbe280f7068419ac3bfcc29765f15a7b095123d08d"
+    },
+    {
+      "seq": 5,
+      "type": "Package issued",
+      "sealed_at": "2026-07-09T08:30:00Z",
+      "recorded_by": "allocycle (external record)",
+      "payload": {
+        "face": "isometric"
+      },
+      "prev_hash": "18c0fef417871872d26615fbe280f7068419ac3bfcc29765f15a7b095123d08d",
+      "hash": "7b61f63c83010a3c3b0217b0f2c18f0ab4b59a022d3adf2cc63ac0864e11ec4d"
+    }
+  ],
+  "event_chain_head": "7b61f63c83010a3c3b0217b0f2c18f0ab4b59a022d3adf2cc63ac0864e11ec4d",
+  "generated_at": "2026-07-09T08:30:00Z",
+  "hash_rule": "SHA-256 (hex) of canonical JSON of the whole package: object keys sorted, whitespace between tokens removed, the top-level \"package_hash\" field excluded.",
+  "package_hash": "07bb844a71256f33a09bc22aa085fb009e671f81adfe08f29c68e83b8450dd7f"
+}

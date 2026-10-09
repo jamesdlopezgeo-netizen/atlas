@@ -1,0 +1,11 @@
+{
+  "name": "allocycle",
+  "version": "0.1.0",
+  "private": true,
+  "description": "External, append-only record of the AI used on one CDR or CCUS carbon-credit batch. Prototype. Not a registry submission.",
+  "scripts": {
+    "build:samples": "node scripts/build-samples.js",
+    "test": "node --test test/*.test.js",
+    "start": "python3 -m http.server 8080"
+  }
+}

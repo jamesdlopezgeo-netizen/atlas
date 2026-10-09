@@ -1,0 +1,97 @@
+{
+  "format": "allocycle.package/v1",
+  "notice": "Prototype. Not a registry submission.",
+  "scope": "allocycle does not score the credit, quantify tons, or submit to a registry.",
+  "record_id": "sample-unapproved",
+  "face": "isometric",
+  "status": "draft",
+  "status_note": "Draft package. The named approval is missing or out of date; see concerns. A draft package is not an issued package.",
+  "cover_sheet": {
+    "face": "Isometric",
+    "default_face": true,
+    "labeling": [
+      "G-K6MR-0",
+      "G-6VGD-0"
+    ],
+    "project_name": "Sample: Gulf Coast Saline Storage",
+    "project_id": "SAMPLE-CCUS-0117",
+    "protocol": "Geologic storage monitoring protocol (sample)",
+    "batch": "Injection period 2026-03"
+  },
+  "outline": {
+    "source": {
+      "ai_system": "Bottom-hole pressure screen",
+      "version": "0.9.4",
+      "artifact_hash": "5fa3d30bd1f261f3a616ac43ed2a424c36c80308f8dee861285431eb33a71cf0"
+    },
+    "modifications": [],
+    "inputs": {
+      "description": "Downhole gauge pressure and temperature; injection rate; step-rate test record"
+    },
+    "data": {
+      "snapshot_hash": "5120f365b48896f12371d739a300f8886447247a6ba295d3a14549685b8c2e6f"
+    },
+    "validation": {
+      "type": "empirical",
+      "summary": "Screen flags compared with engineer-reviewed step-rate test intervals; 2 of 2 known excursions flagged.",
+      "reference": "Reservoir engineering note RE-22 (sample)"
+    },
+    "named_approval": null,
+    "batch_binding": {
+      "project_name": "Sample: Gulf Coast Saline Storage",
+      "project_id": "SAMPLE-CCUS-0117",
+      "registry_face": "isometric",
+      "protocol": "Geologic storage monitoring protocol (sample)",
+      "batch": "Injection period 2026-03",
+      "bound_at_seq": 1,
+      "registered_event_hash": "c260b873e488f8820201abeb1591d0f811284c4d0e04956859eb020f5b3e95bb"
+    }
+  },
+  "concerns": [
+    {
+      "code": "MISSING_APPROVAL",
+      "text": "Concern for the evaluator: no \"Approved for use\" event. No named person approved use of this AI system for this batch. This is a draft package, not an issued one."
+    }
+  ],
+  "events": [
+    {
+      "seq": 1,
+      "type": "Registered",
+      "sealed_at": "2026-04-02T10:12:44Z",
+      "recorded_by": "allocycle (external record)",
+      "payload": {
+        "claim": {
+          "project_name": "Sample: Gulf Coast Saline Storage",
+          "project_id": "SAMPLE-CCUS-0117",
+          "registry_face": "isometric",
+          "protocol": "Geologic storage monitoring protocol (sample)",
+          "batch": "Injection period 2026-03"
+        },
+        "ai_system": "Bottom-hole pressure screen",
+        "version": "0.9.4",
+        "artifact_hash": "5fa3d30bd1f261f3a616ac43ed2a424c36c80308f8dee861285431eb33a71cf0",
+        "inputs": "Downhole gauge pressure and temperature; injection rate; step-rate test record"
+      },
+      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "hash": "c260b873e488f8820201abeb1591d0f811284c4d0e04956859eb020f5b3e95bb"
+    },
+    {
+      "seq": 2,
+      "type": "Validated",
+      "sealed_at": "2026-04-06T15:27:09Z",
+      "recorded_by": "allocycle (external record)",
+      "payload": {
+        "data_snapshot_hash": "5120f365b48896f12371d739a300f8886447247a6ba295d3a14549685b8c2e6f",
+        "validation_type": "empirical",
+        "summary": "Screen flags compared with engineer-reviewed step-rate test intervals; 2 of 2 known excursions flagged.",
+        "reference": "Reservoir engineering note RE-22 (sample)"
+      },
+      "prev_hash": "c260b873e488f8820201abeb1591d0f811284c4d0e04956859eb020f5b3e95bb",
+      "hash": "9ccbcf749e43b4c275ffa12d36cd5b634a79b566ab8e2a3e9676713c31f7186f"
+    }
+  ],
+  "event_chain_head": "9ccbcf749e43b4c275ffa12d36cd5b634a79b566ab8e2a3e9676713c31f7186f",
+  "generated_at": "2026-04-07T09:00:00Z",
+  "hash_rule": "SHA-256 (hex) of canonical JSON of the whole package: object keys sorted, whitespace between tokens removed, the top-level \"package_hash\" field excluded.",
+  "package_hash": "abda09474f8fc0b1d3d96c5a1aa2f81adf68a79e14ab18cba65d800ef901d995"
+}
