@@ -22,6 +22,10 @@
     'SHA-256 (hex) of canonical JSON of the whole package: object keys sorted, ' +
     'whitespace between tokens removed, the top-level "package_hash" field excluded.';
   var GENESIS = '0000000000000000000000000000000000000000000000000000000000000000';
+  var ORIGIN_NOT_CHECKED =
+    'Not checked. This prototype does not sign packages, so anyone with the published rules can build a file ' +
+    'that passes these checks. A matching hash shows the file was not changed after it was hashed, not who made it. ' +
+    'The recorded_by fields are self-asserted.';
 
   var EVENT = {
     REGISTERED: 'Registered',
@@ -72,8 +76,18 @@
     return (x >>> n) | (x << (32 - n));
   }
 
+  // Hashes a string as UTF-8. Anything else is a caller bug (an ArrayBuffer
+  // would otherwise hash as the text "[object ArrayBuffer]"); use sha256Bytes.
   function sha256Hex(input) {
-    var bytes = new TextEncoder().encode(String(input));
+    if (typeof input !== 'string') throw new TypeError('sha256Hex hashes strings (as UTF-8). Use sha256Bytes for bytes.');
+    return sha256Bytes(new TextEncoder().encode(input));
+  }
+
+  function sha256Bytes(input) {
+    var bytes;
+    if (input instanceof ArrayBuffer) bytes = new Uint8Array(input);
+    else if (ArrayBuffer.isView(input)) bytes = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+    else throw new TypeError('sha256Bytes expects an ArrayBuffer or a typed array.');
     var len = bytes.length;
     var total = ((len + 9 + 63) >> 6) << 6;
     var m = new Uint8Array(total);
@@ -161,8 +175,41 @@
     return hashOf(withoutKey(ev, 'hash'));
   }
 
-  // Returns a new sealed event. The caller appends it; nothing here mutates.
+  // The one way to seal: order rules (canSeal) and payload rules
+  // (validateEvent) both run here, so every writer (form, sample builder,
+  // later a connector) goes through the same checks. Returns a new sealed
+  // event; the caller appends it. Throws with a readable message if the
+  // event may not be sealed.
   function sealEvent(events, spec) {
+    var prepared = prepareSeal(events, spec);
+    if (prepared.error) throw new Error(prepared.error);
+    return sealUnchecked(events, { type: spec.type, at: spec.at, recordedBy: spec.recordedBy, payload: prepared.payload });
+  }
+
+  // Returns null if sealEvent would accept this spec, else the reason.
+  function checkSeal(events, spec) {
+    return prepareSeal(events, spec).error;
+  }
+
+  // A Correction's "previous" is derived from the record, never taken on
+  // trust: if the caller leaves it out it is filled in, and if the caller
+  // supplies one it must match.
+  function prepareSeal(events, spec) {
+    var payload = clone(spec.payload);
+    if (spec.type === EVENT.CORRECTION && payload && typeof payload === 'object' &&
+        payload.previous === undefined && Object.prototype.hasOwnProperty.call(CORRECTABLE, payload.field)) {
+      var current = currentValue(events, payload.field);
+      if (current !== undefined) payload.previous = current;
+    }
+    var error = typeof spec.at !== 'string' || !spec.at
+      ? 'An event needs a seal time.'
+      : canSeal(events, spec.type) || validateEvent(events, { type: spec.type, payload: payload });
+    return { error: error, payload: payload };
+  }
+
+  // Low level: builds and hashes an event with no rule checks. Used by
+  // sealEvent, and by tests that need to build a chain a verifier must reject.
+  function sealUnchecked(events, spec) {
     var prev = events.length ? events[events.length - 1].hash : GENESIS;
     var ev = {
       seq: events.length + 1,
@@ -174,6 +221,12 @@
     };
     ev.hash = eventHash(ev);
     return ev;
+  }
+
+  function currentValue(events, field) {
+    var spec = CORRECTABLE[field];
+    var s = deriveState(events);
+    return spec && s[spec.section] ? s[spec.section][spec.key] : undefined;
   }
 
   function checkChain(events) {
@@ -259,8 +312,126 @@
       case EVENT.ISSUED:
         return s.approval ? null : 'Issued is reserved for a record with a current Approved for use event.';
       default:
-        return 'Unknown event type.';
+        return 'Unknown event type "' + type + '".';
     }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Payload rules                                                       */
+  /* ------------------------------------------------------------------ */
+
+  // Every sealed payload field, per event type. Fields not listed here are
+  // rejected: what is sealed is published in every package, forever.
+  //   text      non-empty string        text?   string, may be empty or absent
+  //   hash      64 lowercase hex chars  time    ISO 8601 date-time string
+  //   ref?      string or null, may be absent
+  var PAYLOAD_RULES = {};
+  PAYLOAD_RULES[EVENT.REGISTERED] = { claim: 'claim', ai_system: 'text', version: 'text', artifact_hash: 'hash', inputs: 'text?' };
+  PAYLOAD_RULES[EVENT.VALIDATED] = { data_snapshot_hash: 'hash', validation_type: 'validation_type', summary: 'text', reference: 'text?' };
+  PAYLOAD_RULES[EVENT.APPROVED] = { person: 'text', role: 'text', approved_at: 'time', intended_use: 'text' };
+  PAYLOAD_RULES[EVENT.CORRECTION] = { field: 'correctable', previous: 'derived', value: 'correction_value', reason: 'text', autogenic_reference: 'ref?' };
+  PAYLOAD_RULES[EVENT.ISSUED] = { face: 'face' };
+  var CLAIM_RULES = { project_name: 'text', project_id: 'text', registry_face: 'face', protocol: 'text', batch: 'text' };
+  var FIELD_LABELS = {
+    claim: 'Claim', ai_system: 'AI system name', version: 'Version', artifact_hash: 'Artifact hash', inputs: 'Model inputs',
+    data_snapshot_hash: 'Data snapshot hash', validation_type: 'Validation type', summary: 'Validation summary', reference: 'Reference',
+    person: 'Named person', role: 'Role', approved_at: 'Approval time', intended_use: 'Intended use',
+    field: 'Corrected field', previous: 'Previous value', value: 'New value', reason: 'Reason', autogenic_reference: 'Reference in the team’s log',
+    face: 'Face', project_name: 'Project name', project_id: 'Project or facility id', registry_face: 'Registry face',
+    protocol: 'Protocol or methodology', batch: 'Batch or period'
+  };
+  var ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+
+  function isPlainObject(v) {
+    return v !== null && typeof v === 'object' && !Array.isArray(v);
+  }
+
+  function checkFields(obj, rules, check) {
+    var unknown = Object.keys(obj).filter(function (k) { return !Object.prototype.hasOwnProperty.call(rules, k); });
+    if (unknown.length) return 'Unknown field' + (unknown.length > 1 ? 's' : '') + ': ' + unknown.join(', ') + '.';
+    var keys = Object.keys(rules);
+    for (var i = 0; i < keys.length; i++) {
+      var why = check(keys[i], rules[keys[i]], obj[keys[i]]);
+      if (why) return why;
+    }
+    return null;
+  }
+
+  function checkBasic(key, rule, v) {
+    var label = FIELD_LABELS[key] || key;
+    var optional = rule.slice(-1) === '?';
+    var base = optional ? rule.slice(0, -1) : rule;
+    if (v === undefined) return optional ? null : label + ' is required.';
+    if (base === 'ref') return v === null || typeof v === 'string' ? null : label + ' must be text or empty.';
+    if (typeof v !== 'string') return label + ' must be text.';
+    if (base === 'text') return optional || v.trim() ? null : label + ' is required.';
+    if (base === 'hash') return /^[0-9a-f]{64}$/.test(v) ? null : label + ' must be a SHA-256: 64 lowercase hex characters.';
+    if (base === 'time') return ISO_TIME.test(v) && !isNaN(new Date(v)) ? null : label + ' must be an ISO 8601 date and time.';
+    if (base === 'face') return Object.prototype.hasOwnProperty.call(FACES, v) ? null : label + ' must be one of: ' + FACE_ORDER.join(', ') + '.';
+    if (base === 'validation_type') return VALIDATION_TYPES.indexOf(v) !== -1 ? null : label + ' must be one of: ' + VALIDATION_TYPES.join(', ') + '.';
+    return null;
+  }
+
+  // Returns null if the payload is acceptable for this event at this point
+  // in the record, else a readable reason. Order rules live in canSeal.
+  function validateEvent(events, spec) {
+    var rules = PAYLOAD_RULES[spec.type];
+    if (!rules) return 'Unknown event type "' + spec.type + '".';
+    var p = spec.payload;
+    if (!isPlainObject(p)) return 'The payload must be an object.';
+    var correction = spec.type === EVENT.CORRECTION ? CORRECTABLE[p.field] : null;
+
+    return checkFields(p, rules, function (key, rule, v) {
+      if (rule === 'claim') {
+        if (!isPlainObject(v)) return 'Claim is required.';
+        return checkFields(v, CLAIM_RULES, checkBasic);
+      }
+      if (rule === 'correctable') {
+        if (typeof v !== 'string' || !Object.prototype.hasOwnProperty.call(CORRECTABLE, v)) {
+          return 'Corrected field must be one of: ' + Object.keys(CORRECTABLE).join(', ') + '.';
+        }
+        if (CORRECTABLE[v].needs === EVENT.VALIDATED && !deriveState(events).validated) {
+          return CORRECTABLE[v].label + ' cannot be corrected before a Validated event.';
+        }
+        return null;
+      }
+      if (rule === 'derived') {
+        var current = currentValue(events, p.field);
+        return v === current ? null : 'Previous value does not match the record (the record has ' + JSON.stringify(current) + ').';
+      }
+      if (rule === 'correction_value') {
+        if (typeof v !== 'string') return 'New value must be text.';
+        if (correction.isHash && !/^[0-9a-f]{64}$/.test(v)) return correction.label + ' must be a SHA-256: 64 lowercase hex characters.';
+        if (correction.options && correction.options.indexOf(v) === -1) return correction.label + ' must be one of: ' + correction.options.join(', ') + '.';
+        if (!v.trim() && correction.key !== 'description') return 'New value is required.';
+        if (v === currentValue(events, p.field)) return 'The new value is the same as the current value.';
+        return null;
+      }
+      return checkBasic(key, rule, v);
+    });
+  }
+
+  // Replays the order and payload rules over a whole chain, line by line.
+  // An unknown event type is a problem, never silently skipped.
+  var ENVELOPE_KEYS = ['seq', 'type', 'sealed_at', 'recorded_by', 'payload', 'prev_hash', 'hash'];
+  function checkRules(events) {
+    var problems = [];
+    (events || []).forEach(function (ev, i) {
+      var where = 'Line ' + (i + 1) + (ev && ev.type ? ' (' + ev.type + ')' : '') + ': ';
+      if (!isPlainObject(ev)) { problems.push({ seq: i + 1, message: where + 'not an event object.' }); return; }
+      var extra = Object.keys(ev).filter(function (k) { return ENVELOPE_KEYS.indexOf(k) === -1; });
+      if (extra.length) problems.push({ seq: ev.seq, message: where + 'unknown field' + (extra.length > 1 ? 's ' : ' ') + extra.join(', ') + '.' });
+      if (!PAYLOAD_RULES[ev.type]) {
+        problems.push({ seq: ev.seq, message: where + 'unknown event type. This verifier does not know what the line means.' });
+        return;
+      }
+      var prior = events.slice(0, i);
+      var why = canSeal(prior, ev.type);
+      if (why) problems.push({ seq: ev.seq, message: where + 'sealed out of order. ' + why });
+      why = validateEvent(prior, { type: ev.type, payload: ev.payload });
+      if (why) problems.push({ seq: ev.seq, message: where + why });
+    });
+    return { pass: problems.length === 0, problems: problems };
   }
 
   function deriveConcerns(state) {
@@ -465,41 +636,67 @@
     } catch (e) {
       return { ok: false, error: 'Could not canonicalize the package: ' + e.message };
     }
-    var hash = { stated: stated, recomputed: recomputed, pass: stated === recomputed };
-
-    var events = Array.isArray(pkg.events) ? pkg.events : [];
-    var chain = checkChain(events);
-    if (chain.pass && pkg.event_chain_head !== chain.head) {
-      chain.pass = false;
-      chain.problems.push({ seq: null, message: 'event_chain_head does not match the last event hash.' });
-    }
-
-    var state = deriveState(events);
-    var face = pkg.face;
-    var derivedStatus = FACES[face] ? deriveStatus(events, face) : 'draft';
-    var derived = {
-      outline: deriveOutline(events),
-      cover_sheet: coverSheet(state.claim, face),
-      concerns: deriveConcerns(state),
-      status: derivedStatus
-    };
-    var diffs = []
-      .concat(diff(pkg.outline, derived.outline, 'outline'))
-      .concat(diff(pkg.cover_sheet, derived.cover_sheet, 'cover_sheet'))
-      .concat(diff(pkg.concerns, derived.concerns, 'concerns'))
-      .concat(diff(pkg.status, derived.status, 'status'));
-
-    return {
+    var result = {
       ok: true,
       pkg: pkg,
-      hash: hash,
-      chain: chain,
-      consistency: { pass: diffs.length === 0, diffs: diffs },
-      status: { stated: pkg.status, derived: derivedStatus },
-      concerns: derived.concerns,
-      outline: pkg.outline || null,
-      canonicalLength: canonicalize(withoutKey(pkg, HASH_FIELD)).length
+      hash: { stated: stated, recomputed: recomputed, pass: stated === recomputed },
+      canonicalLength: canonicalize(withoutKey(pkg, HASH_FIELD)).length,
+      format: { stated: pkg.format, known: pkg.format === FORMAT },
+      // Packages are not signed yet. A matching hash shows the file was not
+      // changed after it was hashed; it does not show who hashed it.
+      origin: { checked: false, text: ORIGIN_NOT_CHECKED },
+      checked: false
     };
+    var notChecked = function (reason) { result.reason = reason; return result; };
+
+    // Dispatch on format: the derivation below is the v1 derivation. A file
+    // in another format gets its hash recomputed and nothing else.
+    if (!result.format.known) {
+      return notChecked('Unknown package format ' + JSON.stringify(pkg.format) + '. This verifier checks ' + FORMAT +
+        ' only, so only the hash was recomputed.');
+    }
+    var events = pkg.events;
+    if (!Array.isArray(events) || !events.every(isPlainObject)) {
+      return notChecked('The "events" field is not a list of event objects, so nothing could be re-derived from it.');
+    }
+
+    try {
+      var chain = checkChain(events);
+      if (chain.pass && pkg.event_chain_head !== chain.head) {
+        chain.pass = false;
+        chain.problems.push({ seq: null, message: 'event_chain_head does not match the last event hash.' });
+      }
+      var rules = checkRules(events);
+      var state = deriveState(events);
+      var face = pkg.face;
+      var derivedStatus = FACES[face] ? deriveStatus(events, face) : 'draft';
+      var derived = {
+        outline: deriveOutline(events),
+        cover_sheet: coverSheet(state.claim, face),
+        concerns: deriveConcerns(state),
+        status: derivedStatus
+      };
+      var diffs = []
+        .concat(diff(pkg.outline, derived.outline, 'outline'))
+        .concat(diff(pkg.cover_sheet, derived.cover_sheet, 'cover_sheet'))
+        .concat(diff(pkg.concerns, derived.concerns, 'concerns'))
+        .concat(diff(pkg.status, derived.status, 'status'));
+    } catch (e) {
+      return notChecked('Could not re-derive the package from its events: ' + e.message);
+    }
+
+    var last = events[events.length - 1];
+    result.checked = true;
+    result.chain = chain;
+    result.rules = rules;
+    result.consistency = { pass: diffs.length === 0, diffs: diffs };
+    result.status = { stated: pkg.status, derived: derivedStatus };
+    // A file is a snapshot: it shows the record up to its last line and
+    // cannot show anything sealed later.
+    result.asOf = { seq: last ? last.seq : 0, head: chain.head };
+    result.concerns = derived.concerns;
+    result.outline = pkg.outline || null;
+    return result;
   }
 
   return {
@@ -516,10 +713,15 @@
     ISOMETRIC_LABELS: ISOMETRIC_LABELS,
     CORRECTABLE: CORRECTABLE,
     sha256Hex: sha256Hex,
+    sha256Bytes: sha256Bytes,
     canonicalize: canonicalize,
     hashOf: hashOf,
     normalizeHash: normalizeHash,
     sealEvent: sealEvent,
+    checkSeal: checkSeal,
+    sealUnchecked: sealUnchecked,
+    validateEvent: validateEvent,
+    checkRules: checkRules,
     eventHash: eventHash,
     checkChain: checkChain,
     deriveState: deriveState,

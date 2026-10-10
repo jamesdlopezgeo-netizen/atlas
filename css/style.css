@@ -282,8 +282,6 @@ output.current { display: block; font-family: var(--mono); font-size: 0.82rem; w
 .t-time { color: #7d8276; }
 .t-agent { color: #e8c37a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .t-text { overflow-wrap: anywhere; }
-.term-correction { background: rgba(232, 180, 92, 0.12); }
-.term-correction .t-text { color: #f1d199; }
 @keyframes appear { from { opacity: 0; transform: translateY(2px); } }
 
 /* Verify */
@@ -322,7 +320,7 @@ output.current { display: block; font-family: var(--mono); font-size: 0.82rem; w
 .ol-section:nth-child(odd) { padding-right: 12px; }
 .ol-section h4 { font: 600 0.72rem/1.2 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
 .ol-section.concern h4 { color: var(--concern); }
-.ol-section .kv { grid-template-columns: minmax(90px, max-content) minmax(0, 1fr); font-size: 0.86rem; }
+.ol-section .kv { grid-template-columns: fit-content(45%) minmax(0, 1fr); font-size: 0.86rem; }
 .mods { margin: 0; padding-left: 18px; font-size: 0.86rem; }
 
 @media (max-width: 900px) {
@@ -339,3 +337,11 @@ output.current { display: block; font-family: var(--mono); font-size: 0.82rem; w
   .term-line .t-text, .term-line .t-hash { grid-column: 2; }
   .ol-section:nth-child(odd) { padding-right: 0; }
 }
+.checks li.na .mark { background: var(--code-bg); color: var(--muted); }
+.t-kind { display: inline-block; min-width: 6.2em; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: #7d8276; }
+.term-observed .t-kind { color: #8fc6e8; }
+.term-reported .t-kind { color: #b9b3a3; }
+.term-person .t-kind { color: #e8c37a; }
+.term-sealed .t-kind { color: #9fd8bd; }
+.term-correction { background: rgba(232, 180, 92, 0.12); }
+.term-correction .t-kind, .term-correction .t-text { color: #f1d199; }

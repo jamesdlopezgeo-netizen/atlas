@@ -67,6 +67,11 @@
     return 'allocycle-' + recordId + '-' + pkg.face + '-' + tag + '-' + pkg.package_hash.slice(0, 8) + '.json';
   }
   function faceLabel(face) { return (A.FACES[face] || {}).label || face; }
+  // The approver's name is self-asserted until approver identity is checked.
+  function asEntered(name) { return esc(name) + '<br><span class="hint">name as entered, not verified</span>'; }
+  // Accepts "sha256:" prefixes and upper case; anything else goes to core
+  // unchanged so core's rule gives the error.
+  function tidyHash(raw) { return A.normalizeHash(raw) || raw; }
 
   /* ------------------------------------------------------------------ */
   /* Storage (browser only; sample records are read-only and in memory)  */
@@ -96,14 +101,23 @@
   }
 
   // The only write path for events: seal, then append. No edit, no delete.
-  function appendEvent(record, spec) {
+  // All rules (order and payload) live in core's sealEvent; the form only
+  // tidies input. Rules are checked before the person is asked to confirm.
+  function appendEvent(record, spec, confirmText) {
     if (record.sample) throw new Error('Sample records are read-only.');
-    var why = A.canSeal(record.events, spec.type);
+    var full = { type: spec.type, at: nowIso(), payload: spec.payload };
+    var why = A.checkSeal(record.events, full);
     if (why) throw new Error(why);
-    var ev = A.sealEvent(record.events, { type: spec.type, at: nowIso(), payload: spec.payload });
+    if (confirmText && !confirm(confirmText)) throw cancelled();
+    var ev = A.sealEvent(record.events, full);
     record.events.push(ev);
     saveRecords();
     return ev;
+  }
+  function cancelled() {
+    var e = new Error('Cancelled.');
+    e.cancelled = true;
+    return e;
   }
 
   /* ------------------------------------------------------------------ */
@@ -164,7 +178,8 @@
           '<article class="card"><h3>A person is named before a package exists.</h3>' +
             '<p>If the named approval is missing, the download is a draft package and that gap is labeled a concern for the evaluator. Issued is reserved for a package that has an “Approved for use” event.</p></article>' +
           '<article class="card"><h3>A changed file fails on its own.</h3>' +
-            '<p>At issue, the app hashes the fields (sorted, spacing removed, hash field itself excluded) and writes that hash into the file. Anyone can recompute it. An untouched file passes; a changed field fails.</p></article>' +
+            '<p>At issue, the app hashes the fields (sorted, spacing removed, hash field itself excluded) and writes that hash into the file. Anyone can recompute it. An untouched file passes; a changed field fails.</p>' +
+            '<p class="hint">The prototype does not sign packages yet, so a passing hash shows the file was not changed after it was hashed, not who made it.</p></article>' +
         '</div>' +
 
         '<h2 class="section-title">How this works</h2>' +
@@ -399,7 +414,7 @@
     if (s.approval) {
       var p = s.approval.payload;
       return stepCard(4, 'Approve', 'sealed', kv([
-        ['Person', p.person], ['Role', p.role], ['Approved at', fmtTime(p.approved_at)], ['Intended use', p.intended_use]
+        ['Person', asEntered(p.person), true], ['Role', p.role], ['Approved at', fmtTime(p.approved_at)], ['Intended use', p.intended_use]
       ]), s.approval);
     }
     if (s.staleApproval) {
@@ -411,7 +426,7 @@
     if (blocked) return stepCard(4, 'Approve', 'waiting', body + '<p class="hint">' + esc(blocked) + ' Before an Approved for use event, downloads are draft packages.</p>');
     return stepCard(4, 'Approve', s.staleApproval ? 'concern' : 'ready', body +
       '<form class="form" id="approve-form">' +
-        field('person', 'Named person', '', 'Full name of the person approving use', '', true) +
+        field('person', 'Named person (name as entered; allocycle does not verify identity)', '', 'Full name of the person approving use', '', true) +
         field('role', 'Role', '', 'e.g. Model risk lead, project team', '', true) +
         '<label class="field"><span>Approval time</span><input type="datetime-local" name="approved_at" required value="' + localInputValue(new Date()) + '"><small>Your local time; stored as UTC.</small></label>' +
         '<label class="field"><span>Intended use</span><textarea name="intended_use" rows="2" required placeholder="What this system may be used for on this batch"></textarea></label>' +
@@ -511,7 +526,7 @@
     var guard = function (fn) {
       return function (e) {
         e.preventDefault();
-        try { fn(e); rerender(); } catch (err) { alert(err.message); }
+        try { fn(e); rerender(); } catch (err) { if (!err.cancelled) alert(err.message); }
       };
     };
 
@@ -538,38 +553,29 @@
     var reg = $('#register-form');
     if (reg && !record.sample) reg.addEventListener('submit', guard(function () {
       var claimData = formData(claimForm);
-      var missing = ['project_name', 'project_id', 'protocol', 'batch'].filter(function (k) { return !claimData[k]; });
-      if (missing.length) throw new Error('Fill in the claim (step 1) before sealing Register.');
       var d = formData(reg);
-      var hash = A.normalizeHash(d.artifact_hash);
-      if (!hash) throw new Error('Artifact hash must be a SHA-256: 64 hex characters, optionally prefixed with "sha256:".');
-      if (!confirm('Seal the Registered event? A sealed event cannot be edited or deleted. The claim fields are fixed with it.')) throw new Error('Not sealed.');
-      record.claim = claimData;
       appendEvent(record, { type: E.REGISTERED, payload: {
-        claim: claimData, ai_system: d.ai_system, version: d.version, artifact_hash: hash, inputs: d.inputs || ''
-      } });
+        claim: claimData, ai_system: d.ai_system, version: d.version, artifact_hash: tidyHash(d.artifact_hash), inputs: d.inputs || ''
+      } }, 'Seal the Registered event? A sealed event cannot be edited or deleted. The claim fields are fixed with it.');
+      record.claim = claimData;
+      saveRecords();
     }));
 
     var val = $('#validate-form');
     if (val) val.addEventListener('submit', guard(function () {
       var d = formData(val);
-      var hash = A.normalizeHash(d.data_snapshot_hash);
-      if (!hash) throw new Error('Data snapshot hash must be a SHA-256: 64 hex characters.');
-      if (!confirm('Seal the Validated event? A sealed event cannot be edited or deleted.')) throw new Error('Not sealed.');
       appendEvent(record, { type: E.VALIDATED, payload: {
-        data_snapshot_hash: hash, validation_type: d.validation_type, summary: d.summary, reference: d.reference || ''
-      } });
+        data_snapshot_hash: tidyHash(d.data_snapshot_hash), validation_type: d.validation_type, summary: d.summary, reference: d.reference || ''
+      } }, 'Seal the Validated event? A sealed event cannot be edited or deleted.');
     }));
 
     var appr = $('#approve-form');
     if (appr) appr.addEventListener('submit', guard(function () {
       var d = formData(appr);
       var when = new Date(d.approved_at);
-      if (isNaN(when)) throw new Error('Approval time is not a valid date.');
-      if (!confirm('Seal the Approved for use event naming ' + d.person + '? A sealed event cannot be edited or deleted.')) throw new Error('Not sealed.');
       appendEvent(record, { type: E.APPROVED, payload: {
-        person: d.person, role: d.role, approved_at: when.toISOString().replace(/\.\d+Z$/, 'Z'), intended_use: d.intended_use
-      } });
+        person: d.person, role: d.role, approved_at: isNaN(when) ? d.approved_at : when.toISOString().replace(/\.\d+Z$/, 'Z'), intended_use: d.intended_use
+      } }, 'Seal the Approved for use event naming ' + d.person + '?\n\nThe name is recorded as entered; allocycle does not verify who this is. A sealed event cannot be edited or deleted.');
     }));
 
     var corr = $('#correction-form');
@@ -595,26 +601,17 @@
       corr.addEventListener('submit', guard(function () {
         var d = formData(corr);
         var spec = A.CORRECTABLE[d.field];
-        var value = d.value;
-        if (spec.isHash) {
-          value = A.normalizeHash(value);
-          if (!value) throw new Error(spec.label + ' must be a SHA-256: 64 hex characters.');
-        }
-        if (spec.options && spec.options.indexOf(value) === -1) throw new Error(spec.label + ' must be one of: ' + spec.options.join(', ') + '.');
-        var previous = currentValue();
-        if (value === previous) throw new Error('The new value is the same as the current value.');
-        if (!confirm('Seal a Correction event? Earlier lines stay as they are. If the record was approved, it will need a new named approval.')) throw new Error('Not sealed.');
+        // "previous" is left out on purpose: core derives it from the record.
         appendEvent(record, { type: E.CORRECTION, payload: {
-          field: d.field, previous: previous, value: value, reason: d.reason, autogenic_reference: d.autogenic_reference || null
-        } });
+          field: d.field, value: spec && spec.isHash ? tidyHash(d.value) : d.value, reason: d.reason, autogenic_reference: d.autogenic_reference || null
+        } }, 'Seal a Correction event? Earlier lines stay as they are. If the record was approved, it will need a new named approval.');
       }));
     }
 
     $$('[data-issue]').forEach(function (b) {
       b.addEventListener('click', guard(function () {
         var face = b.getAttribute('data-issue');
-        if (!confirm('Issue the ' + faceLabel(face) + ' package? This seals a Package issued event.')) throw new Error('Not issued.');
-        appendEvent(record, { type: E.ISSUED, payload: { face: face } });
+        appendEvent(record, { type: E.ISSUED, payload: { face: face } }, 'Issue the ' + faceLabel(face) + ' package? This seals a Package issued event.');
         var pkg = A.buildPackage({ recordId: record.id, events: record.events, face: face, generatedAt: nowIso() });
         record.packages = record.packages || [];
         record.packages.push({ face: face, status: pkg.status, package_hash: pkg.package_hash, generated_at: pkg.generated_at, json: pkg });
@@ -660,6 +657,7 @@
         '<p class="sim-label">SIMULATED AGENTS · NOT A REAL CREDIT</p>' +
         '<h1>Live agents</h1>' +
         '<p class="muted">Playback writes steps as they happen, standing in for the Autogenic connector. Each line is hashed onto the line before it (SHA-256 chain). It does not call a real model or issue a package.</p>' +
+        '<p class="hint">The connector only records what it <em>observed</em>: a version at the bound location and the hash it computed. Lines marked <em>reported</em> come from the team’s own log. Only a named <em>person</em> turns an observation into a claim.</p>' +
         '<div class="cases" role="tablist">' + CASES.map(function (c) {
           return '<button class="case' + (c.id === current.id ? ' active' : '') + '" role="tab" aria-selected="' + (c.id === current.id) + '" data-case="' + c.id + '">' +
             '<span class="case-tag">' + esc(c.tag) + '</span><span class="case-title">' + esc(c.title) + '</span>' +
@@ -703,11 +701,11 @@
       line.hash = A.hashOf(line);
       lines.push(line);
       var li = document.createElement('li');
-      li.className = 'term-line' + (line.kind === 'correction' ? ' term-correction' : '');
+      li.className = 'term-line term-' + line.kind;
       li.innerHTML = '<span class="t-seq">' + line.seq + '</span>' +
         '<span class="t-time">' + esc(line.at.slice(11, 19)) + '</span>' +
         '<span class="t-agent">' + esc(line.agent) + '</span>' +
-        '<span class="t-text">' + esc(line.text) + '</span>' +
+        '<span class="t-text"><span class="t-kind">' + esc(line.kind) + '</span> ' + esc(line.text) + '</span>' +
         '<span class="t-hash">' + hashSpan(line.hash, 8) + '<span class="muted"> ← ' + esc(line.prev_hash.slice(0, 6)) + '</span></span>';
       term.appendChild(li);
       term.scrollTop = term.scrollHeight;
@@ -781,7 +779,7 @@
       '<section class="page wide">' +
         '<p class="eyebrow">NO ACCOUNT REQUIRED</p>' +
         '<h1>Verify a package</h1>' +
-        '<p class="muted">Paste package JSON or upload a file. The hash is recomputed the same way it was issued: canonical JSON, keys sorted, whitespace removed, the <code>package_hash</code> field excluded, then SHA-256. An untouched file passes; a changed field fails.</p>' +
+        '<p class="muted">Paste package JSON or upload a file. The hash is recomputed the same way it was issued: canonical JSON, keys sorted, whitespace removed, the <code>package_hash</code> field excluded, then SHA-256. An untouched file passes; a changed field fails, unless whoever changed it also rewrote the hash. Packages are not signed yet, so this page checks that a file is internally consistent, not who made it.</p>' +
         '<div class="verify-grid">' +
           '<div class="card">' +
             '<div class="sample-buttons">' +
@@ -844,38 +842,59 @@
     if (!r.ok) { out.innerHTML = '<div class="card verdict fail"><h2>Cannot check</h2><p>' + esc(r.error) + '</p></div>'; return; }
     var pkg = r.pkg;
     var isIssued = pkg.status === 'issued';
+    var lineProblems = function (list) {
+      return list.map(function (p) { return (p.seq && !/^Line /.test(p.message) ? 'Line ' + p.seq + ': ' : '') + p.message; }).join(' ');
+    };
 
     var verdict =
       '<div class="card verdict ' + (r.hash.pass ? 'pass' : 'fail') + '">' +
         '<p class="verdict-label">' + (r.hash.pass ? 'PASS' : 'FAIL') + '</p>' +
-        '<h2>' + (r.hash.pass ? 'Untouched. The recomputed hash matches the hash written into the file.' : 'Changed. The recomputed hash does not match the hash written into the file.') + '</h2>' +
+        '<h2>' + (r.hash.pass
+          ? 'Hash matches the file (origin not checked). The file was not changed after this hash was written into it.'
+          : 'Changed. The recomputed hash does not match the hash written into the file.') + '</h2>' +
         '<dl class="kv hashes"><dt>In the file</dt><dd><code class="hash full">' + esc(r.hash.stated) + '</code></dd>' +
         '<dt>Recomputed</dt><dd><code class="hash full">' + esc(r.hash.recomputed) + '</code></dd>' +
         '<dt>Canonical form</dt><dd>' + r.canonicalLength.toLocaleString() + ' characters, ' + esc(A.HASH_FIELD) + ' excluded</dd></dl>' +
       '</div>';
 
+    var asOf = r.checked
+      ? ' as of line ' + r.asOf.seq
+      : '';
     var status =
       '<div class="card status-card ' + (isIssued ? '' : 'concern') + '">' +
-        '<h3>Package status: ' + (isIssued ? 'Issued' : 'Draft package') + ' · ' + esc(faceLabel(pkg.face)) + ' face</h3>' +
+        '<h3>Package status: ' + (isIssued ? 'Issued' : 'Draft package') + esc(asOf) + ' · ' + esc(faceLabel(pkg.face)) + ' face</h3>' +
         (r.hash.pass ? '' : '<p class="fail-text">As stated in the file. The file failed the hash check, so nothing in it can be relied on.</p>') +
-        (r.concerns.length
-          ? '<ul class="concerns">' + r.concerns.map(function (c) { return '<li><strong>' + esc(c.code) + '</strong> ' + esc(c.text) + '</li>'; }).join('') + '</ul>'
-          : '<p class="hint">No concerns derived from the events.</p>') +
+        (r.checked
+          ? '<p class="hint">This file shows the record up to line ' + esc(r.asOf.seq) + ' (chain head ' + hashSpan(r.asOf.head, 10) + '). It cannot show anything sealed after that line.</p>' +
+            (r.concerns.length
+              ? '<ul class="concerns">' + r.concerns.map(function (c) { return '<li><strong>' + esc(c.code) + '</strong> ' + esc(c.text) + '</li>'; }).join('') + '</ul>'
+              : '<p class="hint">No concerns derived from the events.</p>')
+          : '<p class="hint">' + esc(r.reason) + '</p>') +
         (pkg.notice ? '<p class="hint">' + esc(pkg.notice) + ' ' + esc(pkg.scope || '') + '</p>' : '') +
       '</div>';
+
+    var items;
+    if (r.checked) {
+      items =
+        checkItem(r.chain.pass, 'Event chain', r.chain.pass
+          ? pkg.events.length + ' events; each hash recomputes and links to the line before it.'
+          : lineProblems(r.chain.problems)) +
+        checkItem(r.rules.pass, 'Events follow the rules', r.rules.pass
+          ? 'Each line was replayed against the order and field rules: known event types only, in a valid order, with valid fields.'
+          : lineProblems(r.rules.problems)) +
+        checkItem(r.consistency.pass, 'Outline matches the events', r.consistency.pass
+          ? 'Outline, cover sheet, concerns and status all re-derive from the sealed events.'
+          : 'These fields differ from what the sealed events say:');
+    } else {
+      items = checkItem(null, 'Event chain, rules and outline', r.reason);
+    }
+    items += checkItem(null, 'Origin', r.origin.text);
 
     var checks =
       '<div class="card">' +
         '<h3>Further checks</h3>' +
-        '<ul class="checks">' +
-          checkItem(r.chain.pass, 'Event chain', r.chain.pass
-            ? (pkg.events || []).length + ' events; each hash recomputes and links to the line before it.'
-            : r.chain.problems.map(function (p) { return (p.seq ? 'Line ' + p.seq + ': ' : '') + p.message; }).join(' ')) +
-          checkItem(r.consistency.pass, 'Outline matches the events', r.consistency.pass
-            ? 'Outline, cover sheet, concerns and status all re-derive from the sealed events.'
-            : 'These fields differ from what the sealed events say:') +
-        '</ul>' +
-        (r.consistency.diffs.length ? '<table class="diffs"><thead><tr><th>Field</th><th>In the file</th><th>From the events</th></tr></thead><tbody>' +
+        '<ul class="checks">' + items + '</ul>' +
+        (r.checked && r.consistency.diffs.length ? '<table class="diffs"><thead><tr><th>Field</th><th>In the file</th><th>From the events</th></tr></thead><tbody>' +
           r.consistency.diffs.map(function (d) {
             return '<tr><td><code>' + esc(d.path) + '</code></td><td class="fail-text">' + esc(d.stated) + '</td><td>' + esc(d.derived) + '</td></tr>';
           }).join('') + '</tbody></table>' : '') +
@@ -884,8 +903,11 @@
     out.innerHTML = verdict + status + checks + outlineView(pkg);
   }
 
+  // pass: true, false, or null for "not checked".
   function checkItem(pass, title, text) {
-    return '<li class="' + (pass ? 'pass' : 'fail') + '"><span class="mark">' + (pass ? '✓' : '✕') + '</span><div><strong>' + esc(title) + '</strong><p>' + esc(text) + '</p></div></li>';
+    var cls = pass === null ? 'na' : pass ? 'pass' : 'fail';
+    var mark = pass === null ? '–' : pass ? '✓' : '✕';
+    return '<li class="' + cls + '"><span class="mark">' + mark + '</span><div><strong>' + esc(title) + '</strong><p>' + esc(text) + '</p></div></li>';
   }
 
   function outlineView(pkg) {
@@ -908,7 +930,7 @@
     var data = o.data ? kv([['Snapshot hash', hashSpan(o.data.snapshot_hash, 16), true]]) : none;
     var val = o.validation ? kv([['Type', o.validation.type], ['Result', o.validation.summary], ['Reference', o.validation.reference]]) : none;
     var appr = o.named_approval
-      ? kv([['Person', o.named_approval.person], ['Role', o.named_approval.role], ['Time', fmtTime(o.named_approval.approved_at)], ['Intended use', o.named_approval.intended_use]])
+      ? kv([['Person', asEntered(o.named_approval.person), true], ['Role', o.named_approval.role], ['Time', fmtTime(o.named_approval.approved_at)], ['Intended use', o.named_approval.intended_use]])
       : '<p class="concern-text">Missing. No current “Approved for use” event. This is a concern for the evaluator.</p>';
     var bind = o.batch_binding
       ? kv([['Project', o.batch_binding.project_name], ['Project / facility id', o.batch_binding.project_id], ['Protocol', o.batch_binding.protocol],
