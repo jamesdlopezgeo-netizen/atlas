@@ -74,7 +74,7 @@ test('draft until approved; correction after approval returns to draft', () => {
   add(A.EVENT.VALIDATED, { data_snapshot_hash: h, validation_type: 'empirical', summary: 's', reference: '' });
   assert.ok(A.canSeal(ev, A.EVENT.ISSUED));
   assert.strictEqual(A.buildPackage({ recordId: 'r', events: ev, face: 'verra', generatedAt: 't' }).status, 'draft');
-  add(A.EVENT.APPROVED, { person: 'N', role: 'R', approved_at: '2026-01-02T00:00:00Z', intended_use: 'u' });
+  add(A.EVENT.APPROVED, { person: 'N', role: 'R', approved_at: '2026-01-01T00:00:00Z', intended_use: 'u' });
   add(A.EVENT.ISSUED, { face: 'verra' });
   const pkg = A.buildPackage({ recordId: 'r', events: ev, face: 'verra', generatedAt: 't' });
   assert.strictEqual(pkg.status, 'issued');
@@ -320,7 +320,8 @@ test('time rule accepts real dates only', () => {
   const ok = ['2028-02-29T00:00:00Z', '2026-12-31T23:59:59Z', '2026-07-08T11:00:00.123+05:30', '2026-07-08T11:00Z'];
   const bad = ['2026-02-29T00:00:00Z', '2026-04-31T00:00:00Z', '2026-02-30T00:00:00Z', '2026-07-08T11:60:00Z', '2026-07-08 11:00:00Z', '2026-07-08T11:00:00+25:00'];
   const evs = chain([[A.EVENT.REGISTERED, REG], [A.EVENT.VALIDATED, VAL]]);
-  for (const t of ok) assert.strictEqual(A.checkSeal(evs, { type: A.EVENT.APPROVED, at: AT, payload: { ...APPR, approved_at: t } }), null, t);
+  const later = '2030-01-01T00:00:00Z';
+  for (const t of ok) assert.strictEqual(A.checkSeal(evs, { type: A.EVENT.APPROVED, at: later, payload: { ...APPR, approved_at: t } }), null, t);
   for (const t of bad) assert.match(A.checkSeal(evs, { type: A.EVENT.APPROVED, at: AT, payload: { ...APPR, approved_at: t } }), /ISO 8601/, t);
 });
 
@@ -468,4 +469,27 @@ test('verifyPackage never throws, even on deeply nested input', () => {
   const r = A.verifyPackage(pkg);
   assert.ok(r && typeof r === 'object');
   assert.ok(r.ok === false || r.hash);
+});
+
+/* ---- App review batch 4: time order ---- */
+
+test('an approval sits between registration and its own seal time; lines are sealed in time order', () => {
+  const evs = chain([[A.EVENT.REGISTERED, REG], [A.EVENT.VALIDATED, VAL]]); // both sealed at AT
+  assert.match(A.checkSeal(evs, { type: A.EVENT.APPROVED, at: AT, payload: { ...APPR, approved_at: '2031-06-01T12:00:00Z' } }), /cannot be later than the moment it is sealed/);
+  assert.match(A.checkSeal(evs, { type: A.EVENT.APPROVED, at: AT, payload: { ...APPR, approved_at: '2020-01-01T00:00:00Z' } }), /cannot be earlier than the Registered line/);
+  assert.strictEqual(A.checkSeal(evs, { type: A.EVENT.APPROVED, at: AT, payload: APPR }), null);
+  assert.match(A.checkSeal(evs, { type: A.EVENT.APPROVED, at: '2025-12-31T00:00:00Z', payload: { ...APPR, approved_at: '2025-12-31T00:00:00Z' } }), /earlier than the line before it/);
+  // The same rules are replayed on a file.
+  const back = chain([[A.EVENT.REGISTERED, REG]]);
+  back.push(A.sealUnchecked(back, { type: A.EVENT.VALIDATED, at: '2020-01-01T00:00:00Z', payload: VAL }));
+  assert.ok(A.checkRules(back).problems.some((p) => /earlier than the line before it/.test(p.message)));
+});
+
+test('an approval entered in the same minute as registration is accepted', () => {
+  const ev = [];
+  ev.push(A.sealEvent(ev, { type: A.EVENT.REGISTERED, at: '2026-01-01T10:00:30Z', payload: REG }));
+  ev.push(A.sealEvent(ev, { type: A.EVENT.VALIDATED, at: '2026-01-01T10:00:40Z', payload: VAL }));
+  const at = '2026-01-01T10:01:00Z';
+  assert.strictEqual(A.checkSeal(ev, { type: A.EVENT.APPROVED, at, payload: { ...APPR, approved_at: '2026-01-01T10:00:00Z' } }), null);
+  assert.match(A.checkSeal(ev, { type: A.EVENT.APPROVED, at, payload: { ...APPR, approved_at: '2026-01-01T09:59:59Z' } }), /earlier than the Registered line/);
 });

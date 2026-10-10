@@ -41,7 +41,7 @@
   }
   function localInputValue(d) {
     var pad = function (n) { return String(n).padStart(2, '0'); };
-    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
   }
   function randomHex() {
     var b = new Uint8Array(32);
@@ -425,7 +425,7 @@
       field('project_name', 'Project name', claim.project_name, 'e.g. Basin Ridge DAC Pilot', dis, true) +
       field('project_id', 'Project or facility id', claim.project_id, 'Registry project id (Verra) or facility id (Puro)', dis, true) +
       '<label class="field"><span>Registry face</span><select name="registry_face"' + dis + '>' + faceOpts + '</select>' +
-        '<small>All three faces can be downloaded; this one is the default.</small></label>' +
+        '<small>All three faces can be downloaded; this one is shown first. Isometric is the default face.</small></label>' +
       field('protocol', 'Protocol or methodology', claim.protocol, 'e.g. Direct air capture protocol', dis, true) +
       field('batch', 'Batch or period', claim.batch, 'e.g. Batch 2026-Q2-07 or monitoring period', dis, true);
   }
@@ -484,6 +484,8 @@
     var st = recordStatus(record, health);
     var concerns = A.deriveConcerns(s);
     var firstProblem = (chain.problems[0] || health.rules.problems[0] || null);
+    nextStep = mode !== 'open' ? 0 : !s.registered ? 2 : !s.validated ? 3 : !s.approval ? 4
+      : A.FACE_ORDER.every(function (f) { return A.deriveStatus(record.events, f) === 'issued'; }) ? 0 : 5;
 
     app.innerHTML =
       '<section class="page wide">' +
@@ -513,12 +515,19 @@
     bindRecord(record);
   }
 
-  function stepCard(n, title, state, body, sealedEv) {
-    var badge = state === 'sealed' ? '<span class="pill sealed">Sealed</span>'
+  // The step to do next on an open record (0: none), marked so the person
+  // can see where to go.
+  var nextStep = 0;
+
+  function stepCard(n, title, state, body, sealedEv, badgeText) {
+    var isNext = n === nextStep;
+    var badge = isNext ? '<span class="pill next">Next</span>'
+      : badgeText ? '<span class="pill">' + esc(badgeText) + '</span>'
+      : state === 'sealed' ? '<span class="pill sealed">Sealed</span>'
       : state === 'ready' ? '<span class="pill">Ready</span>'
       : state === 'concern' ? '<span class="pill concern">Concern</span>'
       : '<span class="pill muted-pill">Waiting</span>';
-    return '<article class="card step step-' + state + '">' +
+    return '<article class="card step step-' + state + (isNext ? ' step-next' : '') + '"' + (isNext ? ' aria-current="step"' : '') + '>' +
       '<header class="step-head"><span class="step-n">' + n + '</span><h2>' + esc(title) + '</h2>' + badge + '</header>' +
       (sealedEv ? '<p class="sealed-line">Line ' + esc(sealedEv.seq) + ' · ' + esc(sealedEv.type) + ' · ' + fmtTime(sealedEv.sealed_at) + ' · ' + hashSpan(sealedEv.hash) + '</p>' : '') +
       body + '</article>';
@@ -540,10 +549,11 @@
     }
     return stepCard(1, 'One claim, one system', 'ready',
       '<form class="form" id="claim-form">' + claimFields(record.claim, ro) +
-      '<p class="hint">Not sealed yet. These fields are fixed when you seal Register.</p>' +
+      '<p class="hint">Not sealed yet. Sealing Register (step 2) fixes these fields; saving them first is optional.</p>' +
       (ro ? '' : '<div class="form-actions"><button class="btn" type="submit">Save claim</button>' +
-        (record.events.length ? '' : '<button class="btn ghost danger" type="button" id="discard">Discard this unsealed record</button>') + '</div>') +
-      '</form>');
+        (record.events.length ? '' : '<button class="btn ghost danger" type="button" id="discard">Discard this unsealed record</button>') +
+        '<span class="hint" id="claim-saved" role="status"></span></div>') +
+      '</form>', null, ro ? null : 'Part of Register');
   }
 
   function hashField(name, label, value, dis, help) {
@@ -617,7 +627,7 @@
       '<form class="form" id="approve-form">' +
         field('person', 'Named person (name as entered; allocycle does not verify identity)', '', 'Full name of the person approving use', '', true) +
         field('role', 'Role', '', 'e.g. Model risk lead, project team', '', true) +
-        '<label class="field"><span>Approval time</span><input type="datetime-local" name="approved_at" required value="' + localInputValue(new Date()) + '"><small>Your local time; stored as UTC.</small></label>' +
+        '<label class="field"><span>Approval time</span><input type="datetime-local" name="approved_at" step="1" required value="' + localInputValue(new Date()) + '"><small>Your local time; stored as UTC.</small></label>' +
         '<label class="field"><span>Intended use</span><textarea name="intended_use" rows="2" required placeholder="What this system may be used for on this batch"></textarea></label>' +
         '<div class="form-actions"><button class="btn primary" type="submit">Seal Approved for use event</button></div>' +
       '</form>');
@@ -625,9 +635,11 @@
 
   function stepIssue(record, s, mode, concerns) {
     var ro = mode !== 'open';
-    var defaultFace = (s.claim || record.claim || {}).registry_face || 'isometric';
+    // The record's registry face is shown first. "Default" is kept for
+    // Isometric alone, as in the package format.
+    var registryFace = (s.claim || record.claim || {}).registry_face || 'isometric';
     var canIssue = !!s.approval;
-    var faces = A.FACE_ORDER.slice().sort(function (a, b) { return (a === defaultFace ? -1 : 0) - (b === defaultFace ? -1 : 0); });
+    var faces = A.FACE_ORDER.slice().sort(function (a, b) { return (a === registryFace ? -1 : 0) - (b === registryFace ? -1 : 0); });
     var cards = faces.map(function (face) {
       var cs = A.coverSheet(s.claim || record.claim, face);
       var stored = (record.packages || []).filter(function (p) { return p.face === face; }).slice(-1)[0];
@@ -648,10 +660,16 @@
         action = '<button class="btn small" data-draft="' + face + '">Download draft package</button>';
       }
       if (mode !== 'sample' && stored) {
-        action += ' <button class="btn small ghost" data-download-stored="' + face + '">Re-download last ' + esc(stored.status) + ' (' + esc(stored.package_hash.slice(0, 8)) + ')</button>';
+        // An issued file that a later line (a correction, a new approval)
+        // replaced is still offered, but never as the current one.
+        var superseded = stored.status === 'issued' && A.deriveStatus(record.events, face) !== 'issued';
+        action += ' <button class="btn small ghost" data-download-stored="' + face + '">' +
+          (superseded ? 'Re-download superseded issued file' : 'Re-download last ' + esc(stored.status)) +
+          ' (' + esc(String(stored.package_hash).slice(0, 8)) + ')</button>' +
+          (superseded ? '<p class="hint">A later line replaced this issued file. It is kept for the record; it is not current.</p>' : '');
       }
-      return '<div class="face' + (face === defaultFace ? ' face-default' : '') + '">' +
-        '<h3>' + esc(faceLabel(face)) + (face === defaultFace ? ' <span class="pill small">default</span>' : '') + '</h3>' +
+      return '<div class="face' + (face === registryFace ? ' face-first' : '') + '">' +
+        '<h3>' + esc(faceLabel(face)) + (face === registryFace ? ' <span class="pill small">registry face</span>' : '') + '</h3>' +
         kv(rows) + '<div class="face-actions">' + action + '</div></div>';
     }).join('');
 
@@ -659,7 +677,9 @@
     if (s.approval && s.issued.some(function (ev) { return ev.seq > s.approval.seq; })) state = 'sealed';
     var head = canIssue
       ? '<p class="hint">Each issue seals a Package issued event, then writes the package hash into the file.</p>'
-      : '<div class="concern-box"><strong>Draft packages only.</strong><ul>' + concerns.map(function (c) { return '<li>' + esc(c.text) + '</li>'; }).join('') + '</ul></div>';
+      : mode === 'open' && !s.registered
+        ? '<p class="hint">Seal Register to download a draft package. Issuing needs a named approval.</p>'
+        : '<div class="concern-box"><strong>Draft packages only.</strong><ul>' + concerns.map(function (c) { return '<li>' + esc(c.text) + '</li>'; }).join('') + '</ul></div>';
     return stepCard(5, 'Issue three cover sheets', state, head + '<div class="faces">' + cards + '</div>');
   }
 
@@ -689,8 +709,7 @@
       '<form class="form" id="correction-form">' +
         '<label class="field"><span>Field</span><select name="field">' + opts + '</select></label>' +
         '<label class="field"><span>Current value</span><output id="corr-current" class="current"></output></label>' +
-        '<label class="field"><span>New value</span><div class="hash-input"><input name="value" required spellcheck="false" autocomplete="off">' +
-          '<button type="button" class="btn small ghost" id="corr-fill" title="Fill with a random placeholder hash" hidden>Placeholder</button></div></label>' +
+        '<div class="field"><label for="corr-value-input">New value</label><div class="hash-input" id="corr-value"></div><small id="corr-value-help"></small></div>' +
         '<label class="field"><span>Reason</span><textarea name="reason" rows="2" required placeholder="What changed in the team’s process"></textarea></label>' +
         field('autogenic_reference', 'Reference in the team’s own log (optional)', '', 'e.g. internal log entry 14', '', false) +
         '<div class="form-actions"><button class="btn" type="submit">Seal Correction event</button></div>' +
@@ -753,11 +772,22 @@
 
     var claimForm = $('#claim-form');
     if (claimForm && !record.sample) {
-      claimForm.addEventListener('submit', guard(function () {
-        var next = copyOf(record);
-        next.claim = formData(claimForm);
-        saveRecord(next, headOf(record.events));
-      }));
+      // Saving the claim does not redraw the page, so anything typed in the
+      // Register form stays where it is.
+      claimForm.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var out = $('#claim-saved');
+        try {
+          var next = copyOf(record);
+          next.claim = formData(claimForm);
+          saveRecord(next, headOf(record.events));
+          record.claim = next.claim;
+          out.textContent = 'Saved.';
+        } catch (err) {
+          if (err.stale) { rerender(); notice(err.message); return; }
+          out.textContent = err.message;
+        }
+      });
       var discard = $('#discard');
       if (discard) discard.addEventListener('click', guard(function () {
         if (record.events.length) return;
@@ -798,21 +828,39 @@
     if (corr) {
       var sel = $('select[name="field"]', corr);
       var cur = $('#corr-current');
-      var valInput = $('input[name="value"]', corr);
-      var fillBtn = $('#corr-fill');
+      var box = $('#corr-value');
+      var help = $('#corr-value-help');
       var currentValue = function () {
         var spec = A.CORRECTABLE[sel.value];
         var st = A.deriveState(record.events);
         return st[spec.section] ? st[spec.section][spec.key] : '';
       };
+      // The new-value control fits the field: a list for fixed choices, a
+      // hash box with a placeholder button for hashes, text otherwise.
       var sync = function () {
         var spec = A.CORRECTABLE[sel.value];
-        cur.textContent = currentValue() || '—';
-        fillBtn.hidden = !spec.isHash;
-        valInput.placeholder = spec.options ? 'One of: ' + spec.options.join(', ') : (spec.isHash ? 'Paste the new SHA-256' : 'New value');
+        var now = currentValue();
+        cur.textContent = now || '—';
+        var attrs = ' id="corr-value-input" name="value" aria-describedby="corr-value-help"';
+        if (spec.options) {
+          box.innerHTML = '<select' + attrs + '>' + spec.options.map(function (o) {
+            return '<option value="' + esc(o) + '"' + (o === now ? ' disabled' : '') + '>' + esc(o) + (o === now ? ' (current)' : '') + '</option>';
+          }).join('') + '</select>';
+          var firstFree = spec.options.filter(function (o) { return o !== now; })[0];
+          if (firstFree) $('select', box).value = firstFree;
+          help.textContent = 'One of: ' + spec.options.join(', ') + '.';
+        } else if (spec.isHash) {
+          box.innerHTML = '<input' + attrs + ' required spellcheck="false" autocomplete="off" placeholder="Paste the new SHA-256">' +
+            '<button type="button" class="btn small ghost" id="corr-fill" title="Fill with a random placeholder hash">Placeholder</button>';
+          $('#corr-fill').addEventListener('click', function () { $('#corr-value-input').value = randomHex(); });
+          help.textContent = '64 hex characters; a "sha256:" prefix is accepted.';
+        } else {
+          var mayBeEmpty = spec.key === 'description';
+          box.innerHTML = '<input' + attrs + (mayBeEmpty ? '' : ' required') + ' autocomplete="off" placeholder="New value">';
+          help.textContent = mayBeEmpty ? 'May be left empty.' : '';
+        }
       };
       sel.addEventListener('change', sync);
-      fillBtn.addEventListener('click', function () { valInput.value = randomHex(); });
       sync();
       corr.addEventListener('submit', guard(function () {
         var d = formData(corr);

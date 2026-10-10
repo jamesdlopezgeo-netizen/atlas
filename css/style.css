@@ -229,7 +229,6 @@ output.current { display: block; font-family: var(--mono); font-size: 0.82rem; w
 .correction-note ul { margin: 6px 0; padding-left: 18px; }
 .faces { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
 .face { border: 1px solid var(--rule); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
-.face-default { border-color: var(--accent); }
 .face h3 { display: flex; gap: 6px; align-items: center; }
 .face .kv { grid-template-columns: minmax(80px, max-content) minmax(0, 1fr); font-size: 0.84rem; }
 .face-actions { margin-top: auto; display: flex; gap: 6px; flex-wrap: wrap; }
@@ -362,3 +361,10 @@ output.current { display: block; font-family: var(--mono); font-size: 0.82rem; w
 .verdict.na { border-color: var(--rule-strong); background: var(--code-bg); }
 .verdict.na .verdict-label { color: var(--muted); }
 .checks .diffs { margin-top: 8px; }
+[hidden] { display: none !important; }
+.pill.next { background: var(--accent); color: var(--accent-ink); }
+.step-next { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.face .kv { grid-template-columns: minmax(0, 1fr); gap: 0; }
+.face .kv dd { margin-bottom: 6px; overflow-wrap: break-word; }
+.face-first { border-color: var(--accent); }
+.field > label { font-size: 0.82rem; font-weight: 600; color: var(--muted); }

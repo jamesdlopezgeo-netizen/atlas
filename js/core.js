@@ -244,7 +244,8 @@
       ? 'An event needs a seal time (ISO 8601 date and time).'
       : spec.recordedBy !== undefined && !nonEmptyText(spec.recordedBy)
         ? 'recorded_by must be non-empty text.'
-        : canSealState(s, spec.type) || validateState(s, { type: spec.type, payload: payload });
+        : sealTimeProblem(events[events.length - 1], spec.at) || canSealState(s, spec.type) ||
+          validateState(s, { type: spec.type, payload: payload, at: spec.at });
     return { error: error, payload: payload };
   }
 
@@ -491,7 +492,7 @@
     if (!isPlainObject(p)) return 'The payload must be an object.';
     var correction = spec.type === EVENT.CORRECTION && hasOwn(CORRECTABLE, p.field) ? CORRECTABLE[p.field] : null;
 
-    return checkFields(p, rules, function (key, rule, v) {
+    var why = checkFields(p, rules, function (key, rule, v) {
       if (rule === 'claim') {
         if (!isPlainObject(v)) return 'Claim is required.';
         return checkFields(v, CLAIM_RULES, checkBasic);
@@ -519,6 +520,27 @@
       }
       return checkBasic(key, rule, v);
     });
+    if (why) return why;
+    // A named person approves between registration and the moment the
+    // approval is sealed: not in the future, not before the record existed.
+    if (spec.type === EVENT.APPROVED) {
+      var t = Date.parse(p.approved_at);
+      if (isIsoTime(spec.at) && t > Date.parse(spec.at)) return 'Approval time cannot be later than the moment it is sealed (' + spec.at + ').';
+      // Compared by the minute: a time entered in a form has no seconds.
+      if (s.registered && isIsoTime(s.registered.sealed_at) && t < Math.floor(Date.parse(s.registered.sealed_at) / 60000) * 60000) {
+        return 'Approval time cannot be earlier than the Registered line (' + s.registered.sealed_at + ').';
+      }
+    }
+    return null;
+  }
+
+  // Lines are sealed in time order: a line cannot be sealed before the one
+  // it follows.
+  function sealTimeProblem(prev, at) {
+    if (!isPlainObject(prev) || !isIsoTime(prev.sealed_at) || !isIsoTime(at)) return null;
+    return Date.parse(at) < Date.parse(prev.sealed_at)
+      ? 'Seal time ' + at + ' is earlier than the line before it (' + prev.sealed_at + ').'
+      : null;
   }
 
   // The event fields outside the payload: exactly these keys, a real seal
@@ -560,7 +582,9 @@
       settle(s);
       why = canSealState(s, ev.type);
       if (why) problems.push({ seq: i + 1, message: where + 'sealed out of order. ' + why });
-      why = validateState(s, { type: ev.type, payload: ev.payload });
+      why = validateState(s, { type: ev.type, payload: ev.payload, at: ev.sealed_at });
+      if (why) problems.push({ seq: i + 1, message: where + why });
+      why = i > 0 ? sealTimeProblem(events[i - 1], ev.sealed_at) : null;
       if (why) problems.push({ seq: i + 1, message: where + why });
       applyEvent(s, ev);
     });
