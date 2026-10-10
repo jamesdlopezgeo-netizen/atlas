@@ -214,7 +214,7 @@ output.current { display: block; font-family: var(--mono); font-size: 0.82rem; w
 }
 .step-sealed .step-n { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .step-concern { border-color: color-mix(in srgb, var(--concern) 35%, var(--rule)); }
-.step-waiting, .step-muted { opacity: 0.85; }
+.step-waiting, .step-muted { border-style: dashed; }
 .muted-pill { background: transparent; box-shadow: inset 0 0 0 1px var(--rule); }
 .sealed-line { font: 0.78rem/1.4 var(--mono); color: var(--muted); margin: -4px 0 10px; }
 .kv { display: grid; grid-template-columns: minmax(110px, max-content) minmax(0, 1fr); gap: 6px 14px; margin: 0; font-size: 0.92rem; }
@@ -368,3 +368,10 @@ output.current { display: block; font-family: var(--mono); font-size: 0.82rem; w
 .face .kv dd { margin-bottom: 6px; overflow-wrap: break-word; }
 .face-first { border-color: var(--accent); }
 .field > label { font-size: 0.82rem; font-weight: 600; color: var(--muted); }
+.form-error { color: var(--fail); background: var(--fail-soft); border-left: 3px solid var(--fail); padding: 8px 10px; border-radius: 0 6px 6px 0; margin: 4px 0; font-size: 0.9rem; }
+[aria-invalid="true"] { border-color: var(--fail); box-shadow: 0 0 0 1px var(--fail); }
+.file-btn:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+::placeholder { color: var(--muted); opacity: 1; }
+.term-correction .t-seq, .term-correction .t-time, .term-correction .muted { color: #c4c9cf; }
+.kv .hash.full { white-space: normal; word-break: break-all; }
+@media (prefers-reduced-motion: reduce) { .term-line { animation: none; } }

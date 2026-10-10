@@ -27,6 +27,11 @@
     n = n || 10;
     return hex.length > n * 2 ? hex.slice(0, n) + '…' + hex.slice(-4) : hex;
   }
+  // Full hashes are shown wherever a person may compare them; short ones
+  // only in dense lists, where the full value is one click away.
+  function fullHash(hex) {
+    return '<code class="hash full">' + esc(typeof hex === 'string' ? hex : shortHash(hex)) + '</code>';
+  }
   function hashSpan(hex, n) {
     return '<code class="hash" title="' + esc(hex) + '">' + esc(shortHash(hex, n)) + '</code>';
   }
@@ -276,6 +281,21 @@
     else if (parts[0] === 'verify') renderVerify(parts[1]);
     else renderNotFound();
     window.scrollTo(0, 0);
+    afterRoute();
+  }
+
+  // Each page gets its own title, and focus moves to its heading so a
+  // screen reader announces the new page (not on the first load).
+  var firstRoute = true;
+  function afterRoute() {
+    var h1 = $('h1');
+    var heading = h1 ? h1.textContent.trim() : '';
+    document.title = heading && heading !== 'allocycle' ? heading + ' · allocycle' : 'allocycle';
+    if (firstRoute) { firstRoute = false; return; }
+    if (h1) {
+      h1.setAttribute('tabindex', '-1');
+      h1.focus({ preventScroll: true });
+    }
   }
   window.addEventListener('hashchange', route);
 
@@ -456,7 +476,7 @@
       try {
         saveRecord(rec, null);
       } catch (err) {
-        alert(err.message);
+        showError(e.target, err.message);
         return;
       }
       location.hash = '#/record/' + rec.id;
@@ -556,18 +576,21 @@
       '</form>', null, ro ? null : 'Part of Register');
   }
 
+  // The label names only the field; the help text describes it and the
+  // placeholder button sits outside the label.
   function hashField(name, label, value, dis, help) {
-    return '<label class="field"><span>' + esc(label) + '</span>' +
-      '<div class="hash-input"><input name="' + name + '" value="' + esc(value || '') + '" placeholder="Paste a SHA-256 (64 hex characters)" spellcheck="false" autocomplete="off" required' + (dis || '') + '>' +
-      (dis ? '' : '<button type="button" class="btn small ghost" data-fill="' + name + '" title="Fill with a random placeholder hash">Placeholder</button>') +
-      '</div>' + (help ? '<small>' + esc(help) + '</small>' : '') + '</label>';
+    return '<div class="field"><label for="f-' + name + '">' + esc(label) + '</label>' +
+      '<div class="hash-input"><input id="f-' + name + '" name="' + name + '" value="' + esc(value || '') + '" placeholder="64 hex characters" spellcheck="false" autocomplete="off" required' +
+      (help ? ' aria-describedby="h-' + name + '"' : '') + (dis || '') + '>' +
+      (dis ? '' : '<button type="button" class="btn small ghost" data-fill="' + name + '" aria-label="Fill ' + esc(label) + ' with a random placeholder hash">Placeholder</button>') +
+      '</div>' + (help ? '<small id="h-' + name + '">' + esc(help) + ' 64 hex characters; a "sha256:" prefix is accepted.</small>' : '') + '</div>';
   }
 
   function stepRegister(record, s, ro) {
     if (s.registered) {
       var src = s.registered.payload;
       return stepCard(2, 'Register', 'sealed', kv([
-        ['AI system', src.ai_system], ['Version', src.version], ['Artifact hash', hashSpan(src.artifact_hash, 16), true], ['Model inputs', src.inputs]
+        ['AI system', src.ai_system], ['Version', src.version], ['Artifact hash', fullHash(src.artifact_hash), true], ['Model inputs', src.inputs]
       ]) + correctedNote(s, ['ai_system', 'ai_version', 'artifact_hash', 'inputs']), s.registered);
     }
     var dis = ro ? ' disabled' : '';
@@ -586,7 +609,7 @@
     if (s.validated) {
       var p = s.validated.payload;
       return stepCard(3, 'Validate', 'sealed', kv([
-        ['Data snapshot hash', hashSpan(p.data_snapshot_hash, 16), true], ['Validation type', p.validation_type],
+        ['Data snapshot hash', fullHash(p.data_snapshot_hash), true], ['Validation type', p.validation_type],
         ['Result', p.summary], ['Reference', p.reference]
       ]) + correctedNote(s, ['data_snapshot_hash', 'validation_type', 'validation_summary']), s.validated);
     }
@@ -754,13 +777,15 @@
     var guard = function (fn) {
       return function (e) {
         e.preventDefault();
+        var before = record.events.length;
         try {
           fn(e);
           rerender();
+          afterWrite(before);
         } catch (err) {
           if (err.cancelled) return;
           if (err.stale) { rerender(); notice(err.message); return; }
-          alert(err.message);
+          showError(e.target, err.message);
         }
       };
     };
@@ -799,6 +824,7 @@
 
     var reg = $('#register-form');
     if (reg && !record.sample) reg.addEventListener('submit', guard(function () {
+      if (!claimForm.reportValidity()) throw cancelled();
       var claimData = formData(claimForm);
       var d = formData(reg);
       appendEvent(record, { type: E.REGISTERED, payload: {
@@ -908,6 +934,65 @@
     });
   }
 
+  // After a seal: say what was sealed, and move focus to the step to do
+  // next (or the event log when there is none).
+  function afterWrite(before) {
+    var r = view.recordId ? getRecord(view.recordId) : null;
+    if (!r || r.events.length <= before) return;
+    var ev = r.events[r.events.length - 1];
+    announce('Line ' + r.events.length + ' sealed: ' + ev.type + '.');
+    var target = $('.step-next h2') || $('.record-log h2');
+    if (target) {
+      target.setAttribute('tabindex', '-1');
+      target.focus({ preventScroll: false });
+    }
+  }
+
+  // Core's messages start with the field's label; that finds the field.
+  var FIELD_NAMES = [
+    ['Reference in the team\u2019s log', 'autogenic_reference'], ['Project or facility id', 'project_id'], ['Project name', 'project_name'],
+    ['Registry face', 'registry_face'], ['Protocol or methodology', 'protocol'], ['Batch or period', 'batch'],
+    ['AI system name', 'ai_system'], ['Version', 'version'], ['Artifact hash', 'artifact_hash'], ['Model inputs', 'inputs'],
+    ['Data snapshot hash', 'data_snapshot_hash'], ['Validation type', 'validation_type'], ['Validation summary', 'summary'],
+    ['Reference', 'reference'], ['Named person', 'person'], ['Role', 'role'], ['Approval time', 'approved_at'],
+    ['Intended use', 'intended_use'], ['New value', 'value'], ['The new value', 'value'], ['Reason', 'reason']
+  ];
+  function fieldFor(message, form) {
+    if (form && form.id === 'correction-form') {
+      var corrected = Object.keys(A.CORRECTABLE).some(function (k) { return message.indexOf(A.CORRECTABLE[k].label) === 0; });
+      if (corrected) return 'value';
+    }
+    var hit = FIELD_NAMES.filter(function (f) { return message.indexOf(f[0]) === 0; })[0];
+    return hit ? hit[1] : null;
+  }
+
+  // Shows an error next to what the person was doing, marks the field it
+  // is about, and moves focus there. Replaces any earlier error.
+  function showError(target, message) {
+    var form = target && target.closest ? target.closest('form') : null;
+    var box = form || (target && target.closest ? target.closest('.face, .card') : null) || $('.page');
+    $$('.form-error').forEach(function (el) { el.remove(); });
+    $$('[aria-invalid="true"]').forEach(function (el) { el.removeAttribute('aria-invalid'); });
+    var p = document.createElement('p');
+    p.className = 'form-error';
+    p.id = 'form-error';
+    p.setAttribute('role', 'alert');
+    p.textContent = message;
+    var actions = box.querySelector('.form-actions, .face-actions');
+    if (actions) box.insertBefore(p, actions); else box.appendChild(p);
+    var name = fieldFor(message, form);
+    var input = name ? ((form && form.querySelector('[name="' + name + '"]')) || $('[name="' + name + '"]')) : null;
+    if (input) {
+      input.setAttribute('aria-invalid', 'true');
+      input.setAttribute('aria-describedby', ((input.getAttribute('aria-describedby') || '').replace(/\bform-error\b/g, '') + ' form-error').trim());
+      input.focus();
+      input.addEventListener('input', function clear() {
+        input.removeAttribute('aria-invalid');
+        input.removeEventListener('input', clear);
+      });
+    }
+  }
+
   /* ------------------------------------------------------------------ */
   /* Live agents (simulated playback)                                    */
   /* ------------------------------------------------------------------ */
@@ -926,8 +1011,8 @@
         '<h1>Live agents</h1>' +
         '<p class="muted">Playback writes steps as they happen, standing in for the Autogenic connector, the team’s log and the named person. Each line is hashed onto the line before it (SHA-256 chain). It does not call a real model or issue a package.</p>' +
         '<p class="hint">The connector only records what it <em>observed</em>: a version at the bound location and the hash it computed. Lines marked <em>reported</em> come from the team’s own log. Only a named <em>person</em> turns an observation into a claim.</p>' +
-        '<div class="cases" role="tablist">' + CASES.map(function (c) {
-          return '<button class="case' + (c.id === current.id ? ' active' : '') + '" role="tab" aria-selected="' + (c.id === current.id) + '" data-case="' + c.id + '">' +
+        '<div class="cases" role="group" aria-label="Cases">' + CASES.map(function (c) {
+          return '<button class="case' + (c.id === current.id ? ' active' : '') + '"' + (c.id === current.id ? ' aria-current="true"' : '') + ' data-case="' + c.id + '">' +
             '<span class="case-tag">' + esc(c.tag) + '</span><span class="case-title">' + esc(c.title) + '</span>' +
             '<span class="case-blurb">' + esc(c.blurb) + '</span></button>';
         }).join('') + '</div>' +
@@ -944,9 +1029,9 @@
           '<div class="agents" id="agents">' + current.agents.map(function (a) {
             return '<span class="agent" data-agent="' + esc(a) + '"><i></i>' + esc(a) + '</span>';
           }).join('') + '</div>' +
-          '<ol class="term" id="term" aria-live="polite"></ol>' +
+          '<div role="log" aria-label="Playback log"><ol class="term" id="term"></ol></div>' +
           '<p class="chain-head" id="sim-head">Chain head ' + hashSpan(A.GENESIS, 10) + ' (genesis)</p>' +
-          '<p class="hint" id="recheck-out"></p>' +
+          '<p class="hint" id="recheck-out" role="status"></p>' +
         '</div>' +
       '</section>';
 
@@ -1276,7 +1361,7 @@
       return '<section class="ol-section' + (concern ? ' concern' : '') + '"><h4>' + esc(title) + '</h4>' + body + '</section>';
     };
     var source = obj(o.source), inp = obj(o.inputs), dat = obj(o.data), vali = obj(o.validation), na = obj(o.named_approval), bb = obj(o.batch_binding);
-    var src = source ? kv([['AI system', source.ai_system], ['Version', source.version], ['Artifact hash', hashSpan(source.artifact_hash, 16), true]]) : none;
+    var src = source ? kv([['AI system', source.ai_system], ['Version', source.version], ['Artifact hash', fullHash(source.artifact_hash), true]]) : none;
     var allMods = Array.isArray(o.modifications) ? o.modifications.filter(obj) : [];
     var modList = allMods.slice(0, MAX_ROWS);
     var mods = modList.length
@@ -1289,14 +1374,14 @@
         (allMods.length > MAX_ROWS ? '<p class="hint">And ' + (allMods.length - MAX_ROWS).toLocaleString() + ' more not shown.</p>' : '')
       : '<p class="hint">No corrections.</p>';
     var inputs = inp ? kv([['Model inputs', inp.description]]) : none;
-    var data = dat ? kv([['Snapshot hash', hashSpan(dat.snapshot_hash, 16), true]]) : none;
+    var data = dat ? kv([['Snapshot hash', fullHash(dat.snapshot_hash), true]]) : none;
     var val = vali ? kv([['Type', vali.type], ['Result', vali.summary], ['Reference', vali.reference]]) : none;
     var appr = na
       ? kv([['Person', asEntered(na.person), true], ['Role', na.role], ['Time', fmtTime(na.approved_at)], ['Intended use', na.intended_use]])
       : '<p class="concern-text">Missing. No current “Approved for use” event. This is a concern for the evaluator.</p>';
     var bind = bb
       ? kv([['Project', bb.project_name], ['Project / facility id', bb.project_id], ['Registry face', faceLabel(bb.registry_face)], ['Protocol', bb.protocol],
-          ['Batch / period', bb.batch], ['Bound at', 'line ' + bb.bound_at_seq], ['Registered line hash', hashSpan(bb.registered_event_hash, 10), true]])
+          ['Batch / period', bb.batch], ['Bound at', 'line ' + bb.bound_at_seq], ['Registered line hash', fullHash(bb.registered_event_hash), true]])
       : none;
     var cover = kv(Object.keys(cs).filter(function (k) { return k !== 'face'; }).map(function (k) {
       var v = cs[k]; return [k.replace(/_/g, ' '), Array.isArray(v) ? v.join(', ') : typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)];
