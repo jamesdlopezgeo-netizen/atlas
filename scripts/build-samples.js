@@ -10,9 +10,9 @@
  *
  * The sample files are frozen test vectors for format allocycle.package/v1.
  * This script never rewrites them: it rebuilds the packages from fixed
- * inputs and fails if the result differs by one byte. (A vector file that
- * does not exist yet is written once.) It writes only js/samples-data.js,
- * which embeds the frozen files.
+ * inputs and fails if the result differs by one byte, or if a vector file
+ * is missing (frozen vectors are never regenerated). It writes only
+ * js/samples-data.js, which embeds the frozen files.
  *
  *   node scripts/build-samples.js           check vectors, write js/samples-data.js
  *   node scripts/build-samples.js --check   check vectors and js/samples-data.js; write nothing
@@ -196,13 +196,9 @@ for (const name of Object.keys(vectors)) {
   const rel = 'samples/' + name + '.json';
   const file = path.join(ROOT, rel);
   if (!fs.existsSync(file)) {
-    if (CHECK) {
-      console.error('MISSING ' + rel);
-      mismatch = true;
-      continue;
-    }
-    fs.writeFileSync(file, pretty(vectors[name]));
-    console.log('new  ' + rel + ' (written once; frozen from now on)');
+    console.error('MISSING ' + rel + ' (frozen vectors are never regenerated; restore it from version control)');
+    mismatch = true;
+    continue;
   }
   const onDisk = fs.readFileSync(file, 'utf8');
   if (onDisk !== pretty(vectors[name])) {
@@ -212,7 +208,7 @@ for (const name of Object.keys(vectors)) {
   frozen[name] = JSON.parse(onDisk);
 }
 if (mismatch) {
-  console.error('Sample files were not changed. If the package format changed on purpose, add new vectors under a new format version instead of editing these.');
+  console.error('Nothing was written. If the package format changed on purpose, add new vectors under a new format version instead of editing these.');
   process.exit(1);
 }
 console.log('ok   samples/*.json match the builder (frozen v1 vectors, not rewritten)');

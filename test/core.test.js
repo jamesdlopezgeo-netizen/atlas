@@ -236,10 +236,23 @@ test('verify dispatches on format and survives malformed events', () => {
 test('frozen v1 vectors: builder reproduces them and never rewrites them', () => {
   const dir = path.join(__dirname, '..', 'samples');
   const names = ['issued', 'unapproved', 'altered', 'issued-verra', 'issued-puro'];
-  const before = names.map((n) => fs.statSync(path.join(dir, n + '.json')).mtimeMs).concat(fs.statSync(path.join(__dirname, '..', 'js', 'samples-data.js')).mtimeMs);
-  execFileSync('node', [path.join(__dirname, '..', 'scripts', 'build-samples.js'), '--check']);
-  const after = names.map((n) => fs.statSync(path.join(dir, n + '.json')).mtimeMs).concat(fs.statSync(path.join(__dirname, '..', 'js', 'samples-data.js')).mtimeMs);
-  assert.deepStrictEqual(after, before);
+  // The default (writing) mode, run in a copy: it rewrites js/samples-data.js
+  // to the same bytes and leaves every vector alone.
+  const os = require('os');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'allocycle-'));
+  for (const d of ['js', 'scripts', 'samples']) fs.cpSync(path.join(__dirname, '..', d), path.join(tmp, d), { recursive: true });
+  const before = names.map((n) => fs.readFileSync(path.join(tmp, 'samples', n + '.json'), 'utf8'));
+  execFileSync('node', [path.join(tmp, 'scripts', 'build-samples.js')]);
+  assert.deepStrictEqual(names.map((n) => fs.readFileSync(path.join(tmp, 'samples', n + '.json'), 'utf8')), before);
+  assert.strictEqual(fs.readFileSync(path.join(tmp, 'js', 'samples-data.js'), 'utf8'),
+    fs.readFileSync(path.join(__dirname, '..', 'js', 'samples-data.js'), 'utf8'));
+  // A missing vector is an error in both modes, and nothing is written.
+  fs.rmSync(path.join(tmp, 'samples', 'issued-puro.json'));
+  for (const args of [[], ['--check']]) {
+    assert.throws(() => execFileSync('node', [path.join(tmp, 'scripts', 'build-samples.js')].concat(args), { stdio: 'pipe' }));
+    assert.ok(!fs.existsSync(path.join(tmp, 'samples', 'issued-puro.json')));
+  }
+  fs.rmSync(tmp, { recursive: true, force: true });
   // Hashes pinned so an accidental change to the vectors, hashing or derivation is caught.
   const pinned = {
     issued: '07bb844a71256f33a09bc22aa085fb009e671f81adfe08f29c68e83b8450dd7f',
@@ -484,10 +497,11 @@ test('an approval sits between registration and its own seal time; lines are sea
   assert.match(A.checkSeal(evs, { type: A.EVENT.APPROVED, at: AT, payload: { ...APPR, approved_at: '2020-01-01T00:00:00Z' } }), /cannot be earlier than the Registered line/);
   assert.strictEqual(A.checkSeal(evs, { type: A.EVENT.APPROVED, at: AT, payload: APPR }), null);
   assert.match(A.checkSeal(evs, { type: A.EVENT.APPROVED, at: '2025-12-31T00:00:00Z', payload: { ...APPR, approved_at: '2025-12-31T00:00:00Z' } }), /earlier than the line before it/);
-  // The same rules are replayed on a file.
+  // Time rules apply when sealing; v1 files written before them still verify.
   const back = chain([[A.EVENT.REGISTERED, REG]]);
   back.push(A.sealUnchecked(back, { type: A.EVENT.VALIDATED, at: '2020-01-01T00:00:00Z', payload: VAL }));
-  assert.ok(A.checkRules(back).problems.some((p) => /earlier than the line before it/.test(p.message)));
+  back.push(A.sealUnchecked(back, { type: A.EVENT.APPROVED, at: '2020-01-01T00:00:00Z', payload: { ...APPR, approved_at: '2019-01-01T00:00:00Z' } }));
+  assert.ok(A.checkRules(back).pass);
 });
 
 test('an approval entered in the same minute as registration is accepted', () => {
@@ -534,4 +548,28 @@ test('the correction playback cites the right lines', () => {
     const before = /sealed before line (\d+)/.exec(st.text);
     if (before) assert.strictEqual(kindAt(+before[1]), 'correction');
   }
+});
+
+/* ---- Fix-plan review ---- */
+
+test('a key with a dot or bracket cannot stand in for a nested field', () => {
+  const pkg = JSON.parse(sample('issued'));
+  pkg.outline['validation.type'] = pkg.outline.validation.type;   // honest copy under a colliding name
+  pkg.outline.validation.type = 'peer-review';                   // forged value the page would show
+  pkg.package_hash = A.packageHash(pkg);
+  const r = A.verifyPackage(pkg);
+  assert.strictEqual(r.consistent, false);
+  const paths = r.consistency.diffs.map((d) => d.path);
+  assert.ok(paths.includes('outline.validation.type'), paths.join());
+  assert.ok(paths.includes('outline["validation.type"]'), paths.join());
+});
+
+test('extra top-level fields and non-text ids are reported', () => {
+  const pkg = JSON.parse(sample('issued'));
+  pkg.registry_status = 'accepted';
+  pkg.record_id = 7;
+  pkg.package_hash = A.packageHash(pkg);
+  const r = A.verifyPackage(pkg);
+  assert.strictEqual(r.consistent, false);
+  assert.deepStrictEqual(r.consistency.diffs.map((d) => d.path).sort(), ['record_id', 'registry_status']);
 });

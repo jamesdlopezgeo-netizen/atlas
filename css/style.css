@@ -375,3 +375,6 @@ output.current { display: block; font-family: var(--mono); font-size: 0.82rem; w
 .term-correction .t-seq, .term-correction .t-time, .term-correction .muted { color: #c4c9cf; }
 .kv .hash.full { white-space: normal; word-break: break-all; }
 @media (prefers-reduced-motion: reduce) { .term-line { animation: none; } }
+dialog.ask { border: 1px solid var(--rule-strong); border-radius: 10px; padding: 20px; max-width: min(520px, calc(100vw - 32px)); background: var(--card); color: var(--ink); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25); }
+dialog.ask::backdrop { background: rgba(17, 22, 30, 0.45); }
+dialog.ask p { white-space: pre-line; margin: 0 0 16px; }

@@ -245,7 +245,7 @@
       : spec.recordedBy !== undefined && !nonEmptyText(spec.recordedBy)
         ? 'recorded_by must be non-empty text.'
         : sealTimeProblem(events[events.length - 1], spec.at) || canSealState(s, spec.type) ||
-          validateState(s, { type: spec.type, payload: payload, at: spec.at });
+          validateState(s, { type: spec.type, payload: payload, at: spec.at, sealing: true });
     return { error: error, payload: payload };
   }
 
@@ -523,7 +523,9 @@
     if (why) return why;
     // A named person approves between registration and the moment the
     // approval is sealed: not in the future, not before the record existed.
-    if (spec.type === EVENT.APPROVED) {
+    // Checked when sealing only: v1 files written before this rule existed
+    // still verify.
+    if (spec.type === EVENT.APPROVED && spec.sealing) {
       var t = Date.parse(p.approved_at);
       if (isIsoTime(spec.at) && t > Date.parse(spec.at)) return 'Approval time cannot be later than the moment it is sealed (' + spec.at + ').';
       // Compared by the minute: a time entered in a form has no seconds.
@@ -535,7 +537,8 @@
   }
 
   // Lines are sealed in time order: a line cannot be sealed before the one
-  // it follows.
+  // it follows. Checked when sealing; not replayed on v1 files, which were
+  // written before the rule existed.
   function sealTimeProblem(prev, at) {
     if (!isPlainObject(prev) || !isIsoTime(prev.sealed_at) || !isIsoTime(at)) return null;
     return Date.parse(at) < Date.parse(prev.sealed_at)
@@ -583,8 +586,6 @@
       why = canSealState(s, ev.type);
       if (why) problems.push({ seq: i + 1, message: where + 'sealed out of order. ' + why });
       why = validateState(s, { type: ev.type, payload: ev.payload, at: ev.sealed_at });
-      if (why) problems.push({ seq: i + 1, message: where + why });
-      why = i > 0 ? sealTimeProblem(events[i - 1], ev.sealed_at) : null;
       if (why) problems.push({ seq: i + 1, message: where + why });
       applyEvent(s, ev);
     });
@@ -758,8 +759,13 @@
       var keys = Array.isArray(value) ? value.map(function (_, i) { return i; })
         : Object.keys(value).filter(function (k) { return value[k] !== undefined; });
       if (!keys.length) out[prefix] = Array.isArray(value) ? '[]' : '{}';
+      // Paths are unambiguous: identifier keys are joined with ".", any other
+      // key is quoted, so a key like "validation.type" cannot stand in for
+      // the nested field.
       keys.forEach(function (k) {
-        var path = Array.isArray(value) ? prefix + '[' + k + ']' : (prefix ? prefix + '.' + k : String(k));
+        var path = Array.isArray(value) ? prefix + '[' + k + ']'
+          : /^[A-Za-z_$][\w$]*$/.test(k) ? (prefix ? prefix + '.' + k : k)
+          : prefix + '[' + JSON.stringify(k) + ']';
         flatten(value[k], path, out);
       });
     } else {
@@ -789,6 +795,10 @@
     if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) return { error: 'The JSON is not an object.' };
     return { pkg: pkg };
   }
+
+  // Every top-level field of a v1 package. Anything else is reported.
+  var PACKAGE_KEYS = ['format', 'notice', 'scope', 'record_id', 'face', 'status', 'status_note', 'cover_sheet', 'outline',
+    'concerns', 'events', 'event_chain_head', 'generated_at', 'hash_rule', HASH_FIELD];
 
   // Never throws: a file that breaks the checker is reported as an error.
   function verifyPackage(input) {
@@ -868,7 +878,13 @@
         .concat(diff(pkg.status_note, statusNote(derivedStatus, state), 'status_note'))
         .concat(diff(pkg.notice, NOTICE, 'notice'))
         .concat(diff(pkg.scope, SCOPE, 'scope'))
-        .concat(diff(pkg.hash_rule, HASH_RULE, 'hash_rule'));
+        .concat(diff(pkg.hash_rule, HASH_RULE, 'hash_rule'))
+        .concat(Object.keys(pkg).filter(function (k) { return PACKAGE_KEYS.indexOf(k) === -1; }).map(function (k) {
+          return { path: k, stated: describe(pkg[k]), derived: '(not part of the package format)' };
+        }))
+        .concat(['record_id', 'generated_at'].filter(function (k) { return typeof pkg[k] !== 'string'; }).map(function (k) {
+          return { path: k, stated: describe(pkg[k]), derived: '(text)' };
+        }));
       consistency = { pass: diffs.length === 0, diffs: diffs };
     } catch (e) {
       consistency = { pass: false, diffs: [], error: 'Could not re-derive the package from its events: ' + e.message };

@@ -45,14 +45,18 @@ test.after(async () => {
   if (server) server.close();
 });
 
-// A fresh browser profile per test; confirms are accepted, page errors kept.
-async function page() {
-  const ctx = await browser.newContext({ acceptDownloads: true });
+// A fresh browser profile per test; page errors are kept.
+async function page(ctx) {
+  ctx = ctx || await browser.newContext({ acceptDownloads: true });
   const p = await ctx.newPage();
   p.errors = [];
   p.on('pageerror', (e) => p.errors.push(e.message));
-  p.on('dialog', (d) => d.accept());
   return p;
+}
+// Clicks a button that asks for confirmation, and confirms in the page.
+async function confirmed(p, selector) {
+  await p.click(selector);
+  await p.click('dialog.ask #ask-ok');
 }
 async function newRecord(p) {
   await p.goto(base + '#/new');
@@ -68,20 +72,20 @@ async function register(p) {
   await p.fill('[name=ai_system]', 'Model');
   await p.fill('[name=version]', '1.0');
   await p.click('#register-form [data-fill]');
-  await p.click('text=Seal Registered event');
+  await confirmed(p, 'text=Seal Registered event');
   await p.waitForSelector('#validate-form');
 }
 async function validate(p) {
   await p.click('#validate-form [data-fill]');
   await p.fill('[name=summary]', 'Within the stated envelope');
-  await p.click('text=Seal Validated event');
+  await confirmed(p, 'text=Seal Validated event');
   await p.waitForSelector('#approve-form');
 }
 async function approve(p) {
   await p.fill('[name=person]', 'A. Person');
   await p.fill('[name=role]', 'Lead');
   await p.fill('[name=intended_use]', 'Screening support');
-  await p.click('text=Seal Approved for use event');
+  await confirmed(p, 'text=Seal Approved for use event');
   await p.waitForSelector('[data-issue]');
 }
 const stored = (p) => p.evaluate((k) => JSON.parse(localStorage.getItem(k) || '[]'), STORE_KEY);
@@ -99,7 +103,8 @@ test('a record goes from Register to an issued package that Verify passes', { sk
   await register(p);
   await validate(p);
   await approve(p);
-  const [dl] = await Promise.all([p.waitForEvent('download'), p.click('[data-issue=isometric]')]);
+  await p.click('[data-issue=isometric]');
+  const [dl] = await Promise.all([p.waitForEvent('download'), p.click('dialog.ask #ask-ok')]);
   const pkg = JSON.parse(fs.readFileSync(await dl.path(), 'utf8'));
   assert.strictEqual(pkg.status, 'issued');
   assert.ok(A.verifyPackage(pkg).consistent);
@@ -121,7 +126,7 @@ test('a second tab cannot overwrite sealed lines', { skip }, async () => {
   }, [STORE_KEY, id]);
   await p.click('#validate-form [data-fill]');
   await p.fill('[name=summary]', 'this tab');
-  await p.click('text=Seal Validated event');
+  await confirmed(p, 'text=Seal Validated event');
   await p.waitForSelector('.notice');
   const r = (await stored(p)).find((x) => x.id === id);
   assert.deepStrictEqual(r.events.map((e) => e.payload.summary || e.type), ['Registered', 'other tab']);
@@ -140,7 +145,7 @@ test('a full browser storage is reported, not shown as sealed', { skip }, async 
   });
   await p.click('#validate-form [data-fill]');
   await p.fill('[name=summary]', 'ok');
-  await p.click('text=Seal Validated event');
+  await confirmed(p, 'text=Seal Validated event');
   await p.waitForSelector('.form-error');
   assert.match(await p.textContent('.form-error'), /^Not saved/);
   assert.ok(await p.$('#validate-form'), 'the Validate form is still there');
@@ -173,10 +178,17 @@ test('Verify: samples, a re-hashed tampered file, and a forged notice', { skip }
   tampered.package_hash = A.packageHash(tampered);
   assert.strictEqual(await verifyText(p, tampered), 'FAIL');
   const forged = sample('unapproved');
+  forged.notice = 'Certified registry submission.';
   forged.scope = 'allocycle scored this credit.';
+  forged.cover_sheet.notice = 'Accepted by the registry.';
   forged.package_hash = A.packageHash(forged);
   assert.strictEqual(await verifyText(p, forged), 'FAIL');
-  assert.match(await p.textContent('.status-card'), /does not score the credit/);
+  // The file's text appears only as a differing field, never as the page's own words.
+  const own = await p.$eval('#verify-out', (el) => [...el.querySelectorAll('.verdict, .status-card, .outline')].map((n) => n.textContent).join(' '));
+  assert.match(own, /does not score the credit/);
+  assert.doesNotMatch(own, /Certified registry|scored this credit|Accepted by the registry/);
+  const diffs = await p.$$eval('.diffs td code', (c) => c.map((x) => x.textContent));
+  assert.ok(diffs.includes('notice') && diffs.includes('scope') && diffs.includes('cover_sheet.notice'), diffs.join());
   assert.deepStrictEqual(p.errors, []);
 });
 
@@ -189,4 +201,41 @@ test('every page renders without script errors', { skip }, async () => {
   }
   assert.deepStrictEqual(p.errors, []);
   assert.strictEqual(await p.title(), 'Not found · allocycle');
+});
+
+test('another tab writing while a confirmation is open is never overwritten', { skip }, async () => {
+  const ctx = await browser.newContext({ acceptDownloads: true });
+  const a = await page(ctx);
+  const b = await page(ctx);
+  // Same record: A's issue waits on its confirmation while B issues another face.
+  const id = await newRecord(a);
+  await register(a);
+  await validate(a);
+  await approve(a);
+  await b.goto(base + '#/record/' + id);
+  await b.waitForSelector('[data-issue]');
+  await a.click('[data-issue=verra]');
+  await a.waitForSelector('dialog.ask[open]');
+  await b.click('[data-issue=isometric]');
+  await Promise.all([b.waitForEvent('download'), b.click('dialog.ask #ask-ok')]);
+  await a.click('dialog.ask #ask-ok');
+  await a.waitForSelector('.notice');
+  let r = (await stored(a)).find((x) => x.id === id);
+  assert.deepStrictEqual(r.events.map((e) => e.payload.face || e.type), ['Registered', 'Validated', 'Approved for use', 'isometric']);
+  // Another record: A's Register confirmation is open while B starts and seals a record.
+  const x = await newRecord(a);
+  await a.fill('[name=ai_system]', 'X');
+  await a.fill('[name=version]', '1');
+  await a.click('#register-form [data-fill]');
+  await a.click('text=Seal Registered event');
+  await a.waitForSelector('dialog.ask[open]');
+  const y = await newRecord(b);
+  await register(b);
+  await a.click('dialog.ask #ask-ok');
+  await a.waitForSelector('#validate-form');
+  const all = await stored(a);
+  assert.strictEqual(all.find((r) => r.id === x).events.length, 1);
+  assert.strictEqual(all.find((r) => r.id === y).events.length, 1);
+  assert.deepStrictEqual(a.errors.concat(b.errors), []);
+  await ctx.close();
 });

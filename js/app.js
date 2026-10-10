@@ -154,35 +154,35 @@
   function newRecordId() {
     return 'rec-' + randomHex().slice(0, 8);
   }
-  function headOf(events) {
-    var n = Array.isArray(events) ? events.length : 0;
-    var last = n ? events[n - 1] : null;
-    return { n: n, head: last && typeof last === 'object' ? last.hash : null };
-  }
-  function sameHead(a, b) {
-    return a.n === b.n && a.head === b.head;
+  // A record's version is its stored JSON: any change by another tab
+  // (a line, a saved claim, a stored package) gives a different version.
+  function versionOf(record) {
+    return record ? JSON.stringify(record) : null;
   }
   function staleError() {
     var e = new Error('Not saved. This record changed in another tab or window, so the page now shows the latest version. Nothing was sealed.');
     e.stale = true;
     return e;
   }
-  // Writes one record. `seen` is the head of the events the caller started
-  // from, or null for a record that must not exist yet.
+  function indexOfRecord(list, id) {
+    var i = -1;
+    list.forEach(function (r, j) { if (isRecord(r) && r.id === id) i = j; });
+    return i;
+  }
+  // Writes one record. `seen` is the version the caller started from, or
+  // null for a record that must not exist yet.
   function saveRecord(rec, seen) {
     var list = readAll();
-    var i = -1;
-    list.forEach(function (r, j) { if (isRecord(r) && r.id === rec.id) i = j; });
-    if (seen === null ? i !== -1 : i === -1 || !sameHead(headOf(list[i].events), seen)) throw staleError();
+    var i = indexOfRecord(list, rec.id);
+    if (seen === null ? i !== -1 : i === -1 || versionOf(list[i]) !== seen) throw staleError();
     var next = list.slice();
     if (i === -1) next.push(rec); else next[i] = rec;
     writeAll(next);
   }
   function removeRecord(id, seen) {
     var list = readAll();
-    var i = -1;
-    list.forEach(function (r, j) { if (isRecord(r) && r.id === id) i = j; });
-    if (i === -1 || !sameHead(headOf(list[i].events), seen)) throw staleError();
+    var i = indexOfRecord(list, id);
+    if (i === -1 || versionOf(list[i]) !== seen) throw staleError();
     writeAll(list.slice(0, i).concat(list.slice(i + 1)));
   }
   function copyOf(record) {
@@ -191,25 +191,57 @@
     return c;
   }
 
+  // An in-page confirmation. Unlike window.confirm() it does not block the
+  // page, so changes another tab makes while it is open have reached this
+  // tab's storage by the time the answer comes back. Resolves on confirm,
+  // rejects with cancelled() otherwise.
+  function ask(text, okLabel, cautious) {
+    return new Promise(function (resolve, reject) {
+      var opener = document.activeElement;
+      var dlg = document.createElement('dialog');
+      dlg.className = 'ask';
+      dlg.setAttribute('aria-labelledby', 'ask-text');
+      dlg.innerHTML = '<p id="ask-text"></p><div class="form-actions">' +
+        '<button class="btn primary" type="button" id="ask-ok"></button>' +
+        '<button class="btn ghost" type="button" id="ask-cancel">Cancel</button></div>';
+      dlg.querySelector('#ask-text').textContent = text;
+      dlg.querySelector('#ask-ok').textContent = okLabel || 'Confirm';
+      document.body.appendChild(dlg);
+      var finish = function (ok) {
+        if (dlg.open) dlg.close();
+        dlg.remove();
+        if (opener && opener.isConnected && opener.focus) opener.focus();
+        if (ok) resolve(); else reject(cancelled());
+      };
+      dlg.querySelector('#ask-ok').addEventListener('click', function () { finish(true); });
+      dlg.querySelector('#ask-cancel').addEventListener('click', function () { finish(false); });
+      dlg.addEventListener('cancel', function (e) { e.preventDefault(); finish(false); });
+      dlg.showModal();
+      dlg.querySelector(cautious ? '#ask-cancel' : '#ask-ok').focus();
+    });
+  }
+
   // The only write path for events: seal, then append. No edit, no delete.
   // All rules (order and payload) live in core's sealEvent; the form only
   // tidies input. Rules are checked before the person is asked to confirm.
   // `also` may add to the new copy of the record (e.g. the issued package),
-  // so the event and what goes with it are saved in one write.
-  function appendEvent(record, spec, confirmText, also) {
-    if (record.sample) throw new Error('Sample records are read-only.');
-    var seen = headOf(record.events);
+  // so the event and what goes with it are saved in one write. Returns a
+  // promise of the saved record.
+  function appendEvent(record, spec, confirmText, okLabel, also) {
+    if (record.sample) return Promise.reject(new Error('Sample records are read-only.'));
+    var seen = versionOf(record);
     var full = { type: spec.type, at: nowIso(), payload: spec.payload };
     var why = A.checkSeal(record.events, full);
-    if (why) throw new Error(why);
-    if (confirmText && !confirm(confirmText)) throw cancelled();
-    full.at = nowIso(); // the seal time is when the person confirmed, not when the dialog opened
-    var ev = A.sealEvent(record.events, full);
-    var next = copyOf(record);
-    next.events.push(ev);
-    if (also) also(next, ev);
-    saveRecord(next, seen);
-    return next;
+    if (why) return Promise.reject(new Error(why));
+    return (confirmText ? ask(confirmText, okLabel) : Promise.resolve()).then(function () {
+      full.at = nowIso(); // the seal time is when the person confirmed, not when the dialog opened
+      var ev = A.sealEvent(record.events, full);
+      var next = copyOf(record);
+      next.events.push(ev);
+      if (also) also(next, ev);
+      saveRecord(next, seen);
+      return next;
+    });
   }
   function cancelled() {
     var e = new Error('Cancelled.');
@@ -219,6 +251,7 @@
 
   // A note shown on the record pages when storage is not doing its job.
   function storageNote() {
+    var all = readAll(); // brings memoryOnly and unreadable up to date
     if (unreadable !== null) {
       return '<div class="concern-box storage-note"><strong>The records stored in this browser could not be read.</strong> ' +
         'Nothing new can be saved until this is resolved, so that the stored text is not overwritten. ' +
@@ -227,9 +260,10 @@
     }
     if (memoryOnly) {
       return '<div class="concern-box storage-note"><strong>This browser is not saving records.</strong> ' +
-        'Local storage is blocked, so records you start here are kept only until this tab closes.</div>';
+        'Local storage is blocked, so records you start here are kept only on this page: reloading it, closing the tab or ' +
+        'opening a record link elsewhere loses them. Download a package before you leave.</div>';
     }
-    var hidden = readAll().length - loadRecords().length;
+    var hidden = all.length - all.filter(isRecord).length;
     if (hidden > 0) {
       return '<div class="concern-box storage-note">' + hidden + ' stored entr' + (hidden === 1 ? 'y is' : 'ies are') +
         ' not a readable record and ' + (hidden === 1 ? 'is' : 'are') + ' hidden. They stay in storage unchanged.</div>';
@@ -248,10 +282,16 @@
     });
     var reset = $('#store-reset');
     if (reset) reset.addEventListener('click', function () {
-      if (!confirm('Clear the unreadable stored text? Download it first if you may need it. This cannot be undone.')) return;
-      try { window.localStorage.removeItem(STORE_KEY); } catch (e) { /* nothing to clear */ }
-      unreadable = null;
-      route();
+      var shown = unreadable;
+      ask('Clear the unreadable stored text? Download it first if you may need it. This cannot be undone.', 'Clear it', true).then(function () {
+        // Clear only the text this note was about: another tab may have
+        // repaired or replaced it in the meantime.
+        var ls = storage();
+        if (ls && ls.getItem(STORE_KEY) === shown) ls.removeItem(STORE_KEY);
+        else notice('The stored records changed in another tab, so nothing was cleared.');
+        unreadable = null;
+        route();
+      }, function () { /* cancelled */ });
     });
   }
 
@@ -260,9 +300,9 @@
   /* ------------------------------------------------------------------ */
 
   var cleanup = null;
-  var view = { recordId: null, head: null };
+  var view = { recordId: null, version: null };
   function route() {
-    view = { recordId: null, head: null };
+    view = { recordId: null, version: null };
     if (cleanup) { cleanup(); cleanup = null; }
     var hash = location.hash.replace(/^#/, '') || '/';
     var parts = hash.split('/').filter(Boolean);
@@ -303,24 +343,44 @@
   // acts on a stale copy.
   window.addEventListener('storage', function (e) {
     if (e.key !== STORE_KEY && e.key !== null) return;
-    if (/^#\/records\/?$/.test(location.hash)) { route(); return; }
+    if (document.querySelector('dialog.ask[open]')) return; // the answer re-checks storage itself
+    if (/^#\/records\/?$/.test(location.hash)) {
+      // Redraw the list in place, keeping the person's scroll and focus.
+      var y = window.scrollY;
+      var ae = document.activeElement;
+      var href = ae && app.contains(ae) ? ae.getAttribute('href') : null;
+      renderRecords();
+      window.scrollTo(0, y);
+      var again = href ? $('a[href="' + href.replace(/"/g, '\\"') + '"]') : null;
+      if (again) again.focus({ preventScroll: true });
+      return;
+    }
     if (!view.recordId) return;
     var r = getRecord(view.recordId);
-    if (!r || !sameHead(headOf(r.events), view.head)) {
+    if (versionOf(r) !== view.version) {
       route();
       notice('This record changed in another tab. The page now shows the latest version.');
     }
   });
 
-  // A short message at the top of the current page.
+  // A short message at the top of the current page. Returns the element.
   function notice(text) {
     var page = $('.page');
-    if (!page) return;
+    if (!page) return null;
     var el = document.createElement('div');
     el.className = 'banner notice';
     el.setAttribute('role', 'status');
     el.textContent = text;
     page.insertBefore(el, page.firstChild);
+    return el;
+  }
+  // A notice the person must not miss (their action did not happen): it
+  // takes focus, which also scrolls it into view.
+  function urgentNotice(text) {
+    var el = notice(text);
+    if (!el) return;
+    el.setAttribute('tabindex', '-1');
+    el.focus();
   }
 
   function decodeId(raw) {
@@ -493,7 +553,7 @@
       app.innerHTML = '<section class="page narrow"><h1>No such record</h1><p>Records you start live in this browser only. <a href="#/records">See records</a>.</p></section>';
       return;
     }
-    view = { recordId: record.id, head: headOf(record.events) };
+    view = { recordId: record.id, version: versionOf(record) };
     var health = recordHealth(record);
     // mode: 'sample' (read-only), 'damaged' (locked) or 'open'.
     var mode = record.sample ? 'sample' : health.ok ? 'open' : 'damaged';
@@ -511,7 +571,7 @@
       '<section class="page wide">' +
         (mode === 'sample' ? '<div class="banner">Sample record · read-only. <a href="#/new">Start your own record</a> to seal events.</div>' : storageNote()) +
         (mode === 'damaged' ? '<div class="concern-box damaged" role="alert"><strong>This record is damaged, so nothing more can be sealed or issued on it.</strong> ' +
-          'Line ' + esc(firstProblem.seq) + ': ' + esc(firstProblem.message) + ' Its lines were changed or removed outside allocycle, or were written by an older version with different rules. Packages downloaded earlier are unchanged.</div>' : '') +
+          (/^Line /.test(firstProblem.message) ? '' : 'Line ' + esc(firstProblem.seq) + ': ') + esc(firstProblem.message) + ' Its lines were changed or removed outside allocycle, or were written by an older version with different rules. Packages downloaded earlier are unchanged.</div>' : '') +
         '<div class="page-head">' +
           '<div><p class="eyebrow">ALLOGENIC RECORD · ' + esc(record.id) + '</p>' +
           '<h1>' + esc(claim.project_name || 'Untitled record') + '</h1>' +
@@ -528,10 +588,11 @@
             stepIssue(record, s, mode, concerns) +
             stepCorrection(record, s, mode) +
           '</div>' +
-          '<aside class="record-log">' + eventLog(record, health) + '</aside>' +
+          '<section class="record-log" aria-label="Event log">' + eventLog(record, health) + '</section>' +
         '</div>' +
       '</section>';
 
+    document.title = (claim.project_name || 'Untitled record') + ' · allocycle';
     bindRecord(record);
   }
 
@@ -631,6 +692,9 @@
 
   function stepApprove(record, s, mode) {
     var ro = mode !== 'open';
+    var now = new Date();
+    var prefill = localInputValue(now);
+    var prefillAt = now.toISOString().replace(/\.\d+Z$/, 'Z');
     var body = '';
     if (s.approval) {
       var p = s.approval.payload;
@@ -650,7 +714,7 @@
       '<form class="form" id="approve-form">' +
         field('person', 'Named person (name as entered; allocycle does not verify identity)', '', 'Full name of the person approving use', '', true) +
         field('role', 'Role', '', 'e.g. Model risk lead, project team', '', true) +
-        '<label class="field"><span>Approval time</span><input type="datetime-local" name="approved_at" step="1" required value="' + localInputValue(new Date()) + '"><small>Your local time; stored as UTC.</small></label>' +
+        '<label class="field"><span>Approval time</span><input type="datetime-local" name="approved_at" step="1" required value="' + prefill + '" data-prefill="' + prefill + '" data-prefill-at="' + prefillAt + '"><small>Your local time; stored as UTC.</small></label>' +
         '<label class="field"><span>Intended use</span><textarea name="intended_use" rows="2" required placeholder="What this system may be used for on this batch"></textarea></label>' +
         '<div class="form-actions"><button class="btn primary" type="submit">Seal Approved for use event</button></div>' +
       '</form>');
@@ -665,31 +729,41 @@
     var faces = A.FACE_ORDER.slice().sort(function (a, b) { return (a === registryFace ? -1 : 0) - (b === registryFace ? -1 : 0); });
     var cards = faces.map(function (face) {
       var cs = A.coverSheet(s.claim || record.claim, face);
-      var stored = (record.packages || []).filter(function (p) { return p.face === face; }).slice(-1)[0];
+      var lastIssued = storedFor(record, face, 'issued');
+      var lastDraft = storedFor(record, face, 'draft');
+      var fl = esc(faceLabel(face));
       var rows = Object.keys(cs).filter(function (k) { return k !== 'face' && k !== 'default_face'; }).map(function (k) {
         var v = cs[k];
         return [k.replace(/_/g, ' '), Array.isArray(v) ? v.join(', ') : v];
       });
       var action;
+      var stored = lastIssued || lastDraft;
+      var storedButton = function (p, kind, text) {
+        return ' <button class="btn small ghost" data-download-stored="' + face + '" data-kind="' + kind + '">' + text +
+          ' (' + esc(String(p.package_hash).slice(0, 8)) + ')</button>';
+      };
       if (mode === 'sample') {
-        action = stored ? '<button class="btn small" data-download-stored="' + face + '">Download ' + (stored.status === 'issued' ? 'issued' : 'draft') + ' package</button>' : '';
+        action = stored ? '<button class="btn small" data-download-stored="' + face + '" data-kind="' + (lastIssued ? 'issued' : 'draft') + '">Download ' + fl + ' ' +
+          (lastIssued ? 'issued' : 'draft') + ' package</button>' : '';
       } else if (mode === 'damaged') {
         action = '<p class="hint">Locked: this record is damaged.</p>';
       } else if (!s.registered) {
         action = '<p class="hint">Seal Register first.</p>';
       } else if (canIssue) {
-        action = '<button class="btn small primary" data-issue="' + face + '">Issue ' + esc(faceLabel(face)) + ' package</button>';
+        action = '<button class="btn small primary" data-issue="' + face + '">Issue ' + fl + ' package</button>';
       } else {
-        action = '<button class="btn small" data-draft="' + face + '">Download draft package</button>';
+        action = '<button class="btn small" data-draft="' + face + '">Download ' + fl + ' draft package</button>';
       }
-      if (mode !== 'sample' && stored) {
+      if (mode !== 'sample') {
         // An issued file that a later line (a correction, a new approval)
-        // replaced is still offered, but never as the current one.
-        var superseded = stored.status === 'issued' && A.deriveStatus(record.events, face) !== 'issued';
-        action += ' <button class="btn small ghost" data-download-stored="' + face + '">' +
-          (superseded ? 'Re-download superseded issued file' : 'Re-download last ' + esc(stored.status)) +
-          ' (' + esc(String(stored.package_hash).slice(0, 8)) + ')</button>' +
-          (superseded ? '<p class="hint">A later line replaced this issued file. It is kept for the record; it is not current.</p>' : '');
+        // replaced is still offered, but never as the current one; drafts
+        // and issued files each keep their own button.
+        var superseded = lastIssued && A.deriveStatus(record.events, face) !== 'issued';
+        if (lastIssued) {
+          action += storedButton(lastIssued, 'issued', superseded ? 'Re-download superseded ' + fl + ' issued file' : 'Re-download ' + fl + ' issued file') +
+            (superseded ? '<p class="hint">A later line replaced this issued file. It is kept for the record; it is not current.</p>' : '');
+        }
+        if (lastDraft) action += storedButton(lastDraft, 'draft', 'Re-download last ' + fl + ' draft');
       }
       return '<div class="face' + (face === registryFace ? ' face-first' : '') + '">' +
         '<h3>' + esc(faceLabel(face)) + (face === registryFace ? ' <span class="pill small">registry face</span>' : '') + '</h3>' +
@@ -698,7 +772,10 @@
 
     var state = canIssue ? 'ready' : (s.registered ? 'concern' : 'waiting');
     if (s.approval && s.issued.some(function (ev) { return ev.seq > s.approval.seq; })) state = 'sealed';
-    var head = canIssue
+    if (mode === 'damaged') state = 'waiting';
+    var head = mode === 'damaged'
+      ? '<p class="hint">Locked: this record is damaged.</p>'
+      : canIssue
       ? '<p class="hint">Each issue seals a Package issued event, then writes the package hash into the file.</p>'
       : mode === 'open' && !s.registered
         ? '<p class="hint">Seal Register to download a draft package. Issuing needs a named approval.</p>'
@@ -713,7 +790,7 @@
     if (!hits.length) return '';
     return '<div class="correction-note"><strong>Superseded by later lines</strong><ul>' + hits.map(function (ev) {
       var spec = A.CORRECTABLE[ev.payload.field];
-      var v = spec.isHash ? hashSpan(ev.payload.value, 12) : esc(ev.payload.value);
+      var v = spec.isHash ? fullHash(ev.payload.value) : esc(ev.payload.value);
       return '<li>Line ' + esc(ev.seq) + ': ' + esc(spec.label) + ' → ' + v + '</li>';
     }).join('') + '</ul><p class="hint">The sealed line above is unchanged. Correction lines sit on top of it.</p></div>';
   }
@@ -774,19 +851,22 @@
 
   function bindRecord(record) {
     var rerender = function () { renderRecord(record.id); };
+    // Runs a write (which may wait for a confirmation), then redraws. A
+    // write that did not happen leaves the page as it was and says why.
     var guard = function (fn) {
       return function (e) {
         e.preventDefault();
+        var target = e.target;
+        var control = e.currentTarget;
         var before = record.events.length;
-        try {
-          fn(e);
+        Promise.resolve().then(function () { return fn(e); }).then(function (done) {
           rerender();
-          afterWrite(before);
-        } catch (err) {
-          if (err.cancelled) return;
-          if (err.stale) { rerender(); notice(err.message); return; }
-          showError(e.target, err.message);
-        }
+          afterWrite(before, control, done);
+        }, function (err) {
+          if (err && err.cancelled) return;
+          if (err && err.stale) { rerender(); urgentNotice(err.message); return; }
+          showError(target, err && err.message ? err.message : String(err));
+        });
       };
     };
     bindStorageNote();
@@ -797,29 +877,42 @@
 
     var claimForm = $('#claim-form');
     if (claimForm && !record.sample) {
-      // Saving the claim does not redraw the page, so anything typed in the
-      // Register form stays where it is.
+      // Saving the claim redraws the page from storage but keeps anything
+      // typed in the Register form.
       claimForm.addEventListener('submit', function (e) {
         e.preventDefault();
-        var out = $('#claim-saved');
+        var reg = $('#register-form');
+        var typed = reg ? formData(reg) : {};
         try {
           var next = copyOf(record);
           next.claim = formData(claimForm);
-          saveRecord(next, headOf(record.events));
-          record.claim = next.claim;
-          out.textContent = 'Saved.';
+          saveRecord(next, versionOf(record));
         } catch (err) {
-          if (err.stale) { rerender(); notice(err.message); return; }
-          out.textContent = err.message;
+          if (err.stale) { rerender(); urgentNotice(err.message); return; }
+          showError(e.target, err.message);
+          return;
         }
+        rerender();
+        var reg2 = $('#register-form');
+        if (reg2) Object.keys(typed).forEach(function (k) { var el = reg2.elements[k]; if (el) el.value = typed[k]; });
+        var out = $('#claim-saved');
+        out.textContent = 'Saved.';
+        var form = $('#claim-form');
+        form.addEventListener('input', function clear() { out.textContent = ''; form.removeEventListener('input', clear); });
       });
       var discard = $('#discard');
-      if (discard) discard.addEventListener('click', guard(function () {
+      if (discard) discard.addEventListener('click', function (e) {
+        var target = e.target;
         if (record.events.length) return;
-        if (!confirm('Discard this record? It has no sealed events.')) throw cancelled();
-        removeRecord(record.id, headOf(record.events));
-        location.hash = '#/records';
-      }));
+        ask('Discard this record? It has no sealed events.', 'Discard', true).then(function () {
+          removeRecord(record.id, versionOf(record));
+          location.hash = '#/records';
+        }).catch(function (err) {
+          if (err.cancelled) return;
+          if (err.stale) { rerender(); urgentNotice(err.message); return; }
+          showError(target, err.message);
+        });
+      });
     }
 
     var reg = $('#register-form');
@@ -827,27 +920,26 @@
       if (!claimForm.reportValidity()) throw cancelled();
       var claimData = formData(claimForm);
       var d = formData(reg);
-      appendEvent(record, { type: E.REGISTERED, payload: {
+      return appendEvent(record, { type: E.REGISTERED, payload: {
         claim: claimData, ai_system: d.ai_system, version: d.version, artifact_hash: tidyHash(d.artifact_hash), inputs: d.inputs || ''
-      } }, 'Seal the Registered event? A sealed event cannot be edited or deleted. The claim fields are fixed with it.',
+      } }, 'Seal the Registered event? A sealed event cannot be edited or deleted. The claim fields are fixed with it.', 'Seal Registered',
       function (next) { next.claim = claimData; });
     }));
 
     var val = $('#validate-form');
     if (val) val.addEventListener('submit', guard(function () {
       var d = formData(val);
-      appendEvent(record, { type: E.VALIDATED, payload: {
+      return appendEvent(record, { type: E.VALIDATED, payload: {
         data_snapshot_hash: tidyHash(d.data_snapshot_hash), validation_type: d.validation_type, summary: d.summary, reference: d.reference || ''
-      } }, 'Seal the Validated event? A sealed event cannot be edited or deleted.');
+      } }, 'Seal the Validated event? A sealed event cannot be edited or deleted.', 'Seal Validated');
     }));
 
     var appr = $('#approve-form');
     if (appr) appr.addEventListener('submit', guard(function () {
       var d = formData(appr);
-      var when = new Date(d.approved_at);
-      appendEvent(record, { type: E.APPROVED, payload: {
-        person: d.person, role: d.role, approved_at: isNaN(when) ? d.approved_at : when.toISOString().replace(/\.\d+Z$/, 'Z'), intended_use: d.intended_use
-      } }, 'Seal the Approved for use event naming ' + d.person + '?\n\nThe name is recorded as entered; allocycle does not verify who this is. A sealed event cannot be edited or deleted.');
+      return appendEvent(record, { type: E.APPROVED, payload: {
+        person: d.person, role: d.role, approved_at: approvalInstant(appr.elements.approved_at), intended_use: d.intended_use
+      } }, 'Seal the Approved for use event naming ' + d.person + '?\n\nThe name is recorded as entered; allocycle does not verify who this is. A sealed event cannot be edited or deleted.', 'Seal approval');
     }));
 
     var corr = $('#correction-form');
@@ -864,6 +956,7 @@
       // The new-value control fits the field: a list for fixed choices, a
       // hash box with a placeholder button for hashes, text otherwise.
       var sync = function () {
+        clearErrors();
         var spec = A.CORRECTABLE[sel.value];
         var now = currentValue();
         cur.textContent = now || '—';
@@ -877,7 +970,7 @@
           help.textContent = 'One of: ' + spec.options.join(', ') + '.';
         } else if (spec.isHash) {
           box.innerHTML = '<input' + attrs + ' required spellcheck="false" autocomplete="off" placeholder="Paste the new SHA-256">' +
-            '<button type="button" class="btn small ghost" id="corr-fill" title="Fill with a random placeholder hash">Placeholder</button>';
+            '<button type="button" class="btn small ghost" id="corr-fill" aria-label="Fill the new value with a random placeholder hash">Placeholder</button>';
           $('#corr-fill').addEventListener('click', function () { $('#corr-value-input').value = randomHex(); });
           help.textContent = '64 hex characters; a "sha256:" prefix is accepted.';
         } else {
@@ -892,9 +985,9 @@
         var d = formData(corr);
         var spec = A.CORRECTABLE[d.field];
         // "previous" is left out on purpose: core derives it from the record.
-        appendEvent(record, { type: E.CORRECTION, payload: {
+        return appendEvent(record, { type: E.CORRECTION, payload: {
           field: d.field, value: spec && spec.isHash ? tidyHash(d.value) : d.value, reason: d.reason, autogenic_reference: d.autogenic_reference || null
-        } }, 'Seal a Correction event? Earlier lines stay as they are. If the record was approved, it will need a new named approval.');
+        } }, 'Seal a Correction event? Earlier lines stay as they are. If the record was approved, it will need a new named approval.', 'Seal correction');
       }));
     }
 
@@ -902,12 +995,14 @@
       b.addEventListener('click', guard(function () {
         var face = b.getAttribute('data-issue');
         var pkg = null;
-        appendEvent(record, { type: E.ISSUED, payload: { face: face } }, 'Issue the ' + faceLabel(face) + ' package? This seals a Package issued event.',
+        return appendEvent(record, { type: E.ISSUED, payload: { face: face } }, 'Issue the ' + faceLabel(face) + ' package? This seals a Package issued event.', 'Issue',
           function (next) {
             pkg = A.buildPackage({ recordId: next.id, events: next.events, face: face, generatedAt: nowIso() });
             next.packages.push(storedPackage(pkg));
-          });
-        download(packageFilename(record.id, pkg), pkg);
+          }).then(function () {
+          download(packageFilename(record.id, pkg), pkg);
+          return { downloaded: faceLabel(face) + ' issued package' };
+        });
       }));
     });
 
@@ -915,37 +1010,68 @@
       b.addEventListener('click', guard(function () {
         var face = b.getAttribute('data-draft');
         var pkg = A.buildPackage({ recordId: record.id, events: record.events, face: face, generatedAt: nowIso() });
-        download(packageFilename(record.id, pkg), pkg);
         // Keep one draft copy per face (drafts can always be rebuilt), so
         // repeated downloads do not fill the browser's storage.
         var next = copyOf(record);
         next.packages = next.packages.filter(function (p) { return !(p.face === face && p.status !== 'issued'); });
         next.packages.push(storedPackage(pkg));
-        saveRecord(next, headOf(record.events));
+        try {
+          saveRecord(next, versionOf(record));
+        } catch (err) {
+          if (err.stale) throw err; // out of date: download nothing; the page reloads
+          download(packageFilename(record.id, pkg), pkg);
+          throw new Error('Downloaded the draft package, but this browser could not keep a copy. ' + err.message.replace(/^Not saved\. /, ''));
+        }
+        download(packageFilename(record.id, pkg), pkg);
+        return { downloaded: faceLabel(face) + ' draft package' };
       }));
     });
 
     $$('[data-download-stored]').forEach(function (b) {
       b.addEventListener('click', function () {
-        var face = b.getAttribute('data-download-stored');
-        var stored = (record.packages || []).filter(function (p) { return p.face === face; }).slice(-1)[0];
+        var stored = storedFor(record, b.getAttribute('data-download-stored'), b.getAttribute('data-kind'));
         if (stored) download(packageFilename(record.id, stored.json), stored.json);
       });
     });
   }
 
-  // After a seal: say what was sealed, and move focus to the step to do
-  // next (or the event log when there is none).
-  function afterWrite(before) {
+  // The last stored package of one kind ('issued' or 'draft') for a face.
+  function storedFor(record, face, kind) {
+    return (record.packages || []).filter(function (p) {
+      return p && p.face === face && (kind === 'issued' ? p.status === 'issued' : p.status !== 'issued');
+    }).slice(-1)[0] || null;
+  }
+
+  // The approval time as an ISO instant. If the field still holds the time
+  // it was filled with, that exact instant is used: a local time in the
+  // repeated hour of a daylight-saving change maps to two instants.
+  function approvalInstant(input) {
+    var prefill = input.getAttribute('data-prefill');
+    var at = input.getAttribute('data-prefill-at');
+    var v = input.value;
+    if (at && (v === prefill || v + ':00' === prefill || v === prefill.replace(/:00$/, ''))) return at;
+    var when = new Date(v);
+    return isNaN(when) ? v : when.toISOString().replace(/\.\d+Z$/, 'Z');
+  }
+
+  // After a write: say what happened, and put focus where the person can
+  // carry on (the button they used, the next step, or the event log).
+  function afterWrite(before, control, done) {
     var r = view.recordId ? getRecord(view.recordId) : null;
-    if (!r || r.events.length <= before) return;
-    var ev = r.events[r.events.length - 1];
-    announce('Line ' + r.events.length + ' sealed: ' + ev.type + '.');
-    var target = $('.step-next h2') || $('.record-log h2');
-    if (target) {
-      target.setAttribute('tabindex', '-1');
-      target.focus({ preventScroll: false });
+    if (r && r.events.length > before) {
+      var ev = r.events[r.events.length - 1];
+      announce('Line ' + r.events.length + ' sealed: ' + ev.type + '.' + (done && done.downloaded ? ' Downloaded the ' + done.downloaded + '.' : ''));
+      var target = $('.step-next h2') || $('.record-log h2');
+      if (target) {
+        target.setAttribute('tabindex', '-1');
+        target.focus({ preventScroll: false });
+      }
+      return;
     }
+    if (done && done.downloaded) announce('Downloaded the ' + done.downloaded + '.');
+    var face = control && control.getAttribute ? control.getAttribute('data-draft') : null;
+    var again = face ? $('[data-draft="' + face + '"]') : null;
+    if (again) again.focus();
   }
 
   // Core's messages start with the field's label; that finds the field.
@@ -968,11 +1094,20 @@
 
   // Shows an error next to what the person was doing, marks the field it
   // is about, and moves focus there. Replaces any earlier error.
+  // Removes any error shown earlier, and its references on fields.
+  function clearErrors() {
+    $$('.form-error').forEach(function (el) { el.remove(); });
+    $$('[aria-invalid="true"]').forEach(function (el) { el.removeAttribute('aria-invalid'); });
+    $$('[aria-describedby~="form-error"]').forEach(function (el) {
+      var rest = el.getAttribute('aria-describedby').split(/\s+/).filter(function (t) { return t && t !== 'form-error'; }).join(' ');
+      if (rest) el.setAttribute('aria-describedby', rest); else el.removeAttribute('aria-describedby');
+    });
+  }
+
   function showError(target, message) {
     var form = target && target.closest ? target.closest('form') : null;
     var box = form || (target && target.closest ? target.closest('.face, .card') : null) || $('.page');
-    $$('.form-error').forEach(function (el) { el.remove(); });
-    $$('[aria-invalid="true"]').forEach(function (el) { el.removeAttribute('aria-invalid'); });
+    clearErrors();
     var p = document.createElement('p');
     p.className = 'form-error';
     p.id = 'form-error';
@@ -987,7 +1122,7 @@
       input.setAttribute('aria-describedby', ((input.getAttribute('aria-describedby') || '').replace(/\bform-error\b/g, '') + ' form-error').trim());
       input.focus();
       input.addEventListener('input', function clear() {
-        input.removeAttribute('aria-invalid');
+        clearErrors();
         input.removeEventListener('input', clear);
       });
     }
@@ -1029,7 +1164,7 @@
           '<div class="agents" id="agents">' + current.agents.map(function (a) {
             return '<span class="agent" data-agent="' + esc(a) + '"><i></i>' + esc(a) + '</span>';
           }).join('') + '</div>' +
-          '<div role="log" aria-label="Playback log"><ol class="term" id="term"></ol></div>' +
+          '<div role="log" aria-label="Playback log"><ol class="term" id="term" tabindex="0" aria-label="Playback log lines"></ol></div>' +
           '<p class="chain-head" id="sim-head">Chain head ' + hashSpan(A.GENESIS, 10) + ' (genesis)</p>' +
           '<p class="hint" id="recheck-out" role="status"></p>' +
         '</div>' +
@@ -1164,7 +1299,7 @@
               '<button class="btn ghost" id="clear-btn">Clear</button>' +
             '</div>' +
             '<details class="recompute"><summary>Recompute it yourself</summary>' +
-              '<p class="hint">This Python command recomputes the hash and prints True when it matches the hash in the file. It gives the same result as this page for the values allocycle writes (text, booleans, null, small integers). Another tool must produce the same canonical form, which for these values is RFC 8785 (JCS).</p>' +
+              '<p class="hint">This Python command recomputes the hash and prints True when it matches the hash in the file. For the values allocycle writes (text, booleans, null, small integers) it computes the same hash as the Recomputed line on this page. It checks only the hash: True does not cover the event chain, rules or outline checks, so it can print True for a file this page marks FAIL. Another tool must produce the same canonical form, which for these values is RFC 8785 (JCS).</p>' +
               '<pre>python3 -c "import json,hashlib,sys; d=json.load(open(sys.argv[1])); h=d.pop(\'package_hash\'); ' +
               'c=json.dumps(d,sort_keys=True,separators=(\',\',\':\'),ensure_ascii=False); ' +
               'print(h==hashlib.sha256(c.encode()).hexdigest())" package.json</pre>' +
@@ -1199,22 +1334,34 @@
     var readFile = function (file) {
       if (!file) return;
       var r = new FileReader();
-      r.onload = function () { setPreset(null); input.value = String(r.result); run({ focus: true }); };
+      r.onload = function () {
+        if (!input.isConnected) return; // the person left Verify while the file was read
+        setPreset(null);
+        input.value = String(r.result);
+        run({ focus: true });
+      };
       r.readAsText(file);
     };
     $('#pkg-file').addEventListener('change', function (e) { readFile(e.target.files[0]); e.target.value = ''; });
     // A dropped file is caught anywhere on the page; dropped text goes into
     // the box as usual.
-    var page = $('.page');
     var hasFiles = function (e) { return e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') !== -1; };
-    page.addEventListener('dragover', function (e) { if (hasFiles(e)) { e.preventDefault(); input.classList.add('drop'); } });
-    page.addEventListener('dragleave', function (e) { if (!page.contains(e.relatedTarget)) input.classList.remove('drop'); });
-    page.addEventListener('drop', function (e) {
+    var onOver = function (e) { if (hasFiles(e)) { e.preventDefault(); input.classList.add('drop'); } };
+    var onLeave = function (e) { if (!e.relatedTarget) input.classList.remove('drop'); };
+    var onDrop = function (e) {
       input.classList.remove('drop');
       if (!hasFiles(e)) return;
       e.preventDefault();
       readFile(e.dataTransfer.files[0]);
-    });
+    };
+    document.addEventListener('dragover', onOver);
+    document.addEventListener('dragleave', onLeave);
+    document.addEventListener('drop', onDrop);
+    cleanup = function () {
+      document.removeEventListener('dragover', onOver);
+      document.removeEventListener('dragleave', onLeave);
+      document.removeEventListener('drop', onDrop);
+    };
 
     var sample = ownSample(preset);
     if (sample) {
@@ -1273,7 +1420,9 @@
         ? 'The hash matches, but this verifier cannot check the rest of a file in this format.'
         : r.consistent
           ? 'Every check passed: the hash matches and the file agrees with its sealed events (origin not checked).'
-          : 'The hash matches, but ' + joinList(failed) + ' failed. The file was probably changed and its hash rewritten.';
+          : r.chain.pass
+            ? 'The hash matches, but ' + joinList(failed) + ' failed. The file may have been changed and its hash rewritten, or written by another tool or an older version of allocycle.'
+            : 'The hash matches, but ' + joinList(failed) + ' failed. The file was changed and its hash rewritten.';
     var verdict =
       '<div class="card verdict ' + state + '">' +
         '<p class="verdict-label">' + label + '</p>' +
@@ -1321,16 +1470,19 @@
         }).join('') + '</tbody></table>' +
         (diffs.length > MAX_ROWS ? '<p class="hint">And ' + (diffs.length - MAX_ROWS).toLocaleString() + ' more differing fields not shown.</p>' : '')
       : '';
+    var moreProblems = function (list) {
+      return list.length > MAX_ROWS ? '<p class="hint">And ' + (list.length - MAX_ROWS).toLocaleString() + ' more problems not shown.</p>' : '';
+    };
     var items;
     if (r.checked) {
       var count = Array.isArray(pkg.events) ? pkg.events.length : 0;
       items =
         checkItem(r.chain.pass, 'Event chain', r.chain.pass
           ? count + ' events; each hash recomputes and links to the line before it.'
-          : lineProblems(r.chain.problems.slice(0, MAX_ROWS))) +
+          : lineProblems(r.chain.problems.slice(0, MAX_ROWS)), moreProblems(r.chain.problems)) +
         checkItem(r.rules.pass, 'Events follow the rules', r.rules.pass
-          ? 'Each line was replayed against the envelope, order and payload rules: known event types only, in a valid order, with valid fields and seal times.'
-          : lineProblems(r.rules.problems.slice(0, MAX_ROWS))) +
+          ? 'Each line was replayed against the envelope, order and payload rules: known event types only, in a valid order, with valid fields.'
+          : lineProblems(r.rules.problems.slice(0, MAX_ROWS)), moreProblems(r.rules.problems)) +
         checkItem(r.consistency.pass, 'Outline matches the events', r.consistency.pass
           ? 'Outline, cover sheet, concerns, status and the fixed notice all re-derive from the sealed events.'
           : r.consistency.error || 'These fields differ from what the sealed events say:', diffTable);
@@ -1371,15 +1523,15 @@
     var source = obj(o.source), inp = obj(o.inputs), dat = obj(o.data), vali = obj(o.validation), na = obj(o.named_approval), bb = obj(o.batch_binding);
     var src = source ? kv([['AI system', source.ai_system], ['Version', source.version], ['Artifact hash', fullHash(source.artifact_hash), true]]) : none;
     var allMods = Array.isArray(o.modifications) ? o.modifications.filter(obj) : [];
-    var modList = allMods.slice(0, MAX_ROWS);
+    var modList = allMods.slice(-MAX_ROWS); // the latest corrections matter most
     var mods = modList.length
-      ? '<ul class="mods">' + modList.map(function (m) {
+      ? (allMods.length > MAX_ROWS ? '<p class="hint">' + (allMods.length - MAX_ROWS).toLocaleString() + ' earlier corrections not shown.</p>' : '') +
+        '<ul class="mods">' + modList.map(function (m) {
           var spec = typeof m.field === 'string' && Object.prototype.hasOwnProperty.call(A.CORRECTABLE, m.field) ? A.CORRECTABLE[m.field] : { label: String(m.field) };
-          var fmt = function (v) { return spec.isHash ? hashSpan(v, 10) : esc(v); };
+          var fmt = function (v) { return spec.isHash ? fullHash(v) : esc(v); };
           return '<li><strong>Line ' + esc(m.seq) + '</strong> · ' + esc(spec.label) + ': ' + fmt(m.previous) + ' → ' + fmt(m.value) +
             '<br><span class="muted">' + esc(m.reason) + (m.autogenic_reference ? ' (' + esc(m.autogenic_reference) + ')' : '') + '</span></li>';
-        }).join('') + '</ul>' +
-        (allMods.length > MAX_ROWS ? '<p class="hint">And ' + (allMods.length - MAX_ROWS).toLocaleString() + ' more not shown.</p>' : '')
+        }).join('') + '</ul>'
       : '<p class="hint">No corrections.</p>';
     var inputs = inp ? kv([['Model inputs', inp.description]]) : none;
     var data = dat ? kv([['Snapshot hash', fullHash(dat.snapshot_hash), true]]) : none;
@@ -1391,8 +1543,12 @@
       ? kv([['Project', bb.project_name], ['Project / facility id', bb.project_id], ['Registry face', faceLabel(bb.registry_face)], ['Protocol', bb.protocol],
           ['Batch / period', bb.batch], ['Bound at', 'line ' + bb.bound_at_seq], ['Registered line hash', fullHash(bb.registered_event_hash), true]])
       : none;
-    var cover = kv(Object.keys(cs).filter(function (k) { return k !== 'face'; }).map(function (k) {
-      var v = cs[k]; return [k.replace(/_/g, ' '), Array.isArray(v) ? v.join(', ') : typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)];
+    // Only the fields the format defines for this face are drawn; any other
+    // key in the file is listed as a differing field instead.
+    var known = typeof pkg.face === 'string' && Object.prototype.hasOwnProperty.call(A.FACES, pkg.face)
+      ? Object.keys(A.coverSheet({}, pkg.face)) : [];
+    var cover = kv(known.filter(function (k) { return k !== 'face' && Object.prototype.hasOwnProperty.call(cs, k); }).map(function (k) {
+      var v = cs[k]; return [k.replace(/_/g, ' '), Array.isArray(v) ? v.join(', ') : typeof v === 'object' && v !== null ? JSON.stringify(v).slice(0, 200) : String(v)];
     }));
     return '<div class="card outline">' +
       '<h3>Outline' + (consistent ? '' : ' <span class="muted small">(as written in the file; it did not pass every check)</span>') + '</h3>' +
