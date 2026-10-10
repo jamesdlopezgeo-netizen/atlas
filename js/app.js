@@ -351,7 +351,17 @@
   /* Records list and new record                                         */
   /* ------------------------------------------------------------------ */
 
-  function recordStatus(record) {
+  // Is the stored record intact? A damaged record (edited, removed or
+  // invalid lines) is shown, but nothing more is sealed or issued on it.
+  function recordHealth(record) {
+    var chain = A.checkChain(record.events);
+    var rules = A.checkRules(record.events);
+    return { chain: chain, rules: rules, ok: chain.pass && rules.pass };
+  }
+
+  function recordStatus(record, health) {
+    health = health || recordHealth(record);
+    if (!health.ok) return { key: 'fail', label: health.chain.pass ? 'Damaged · breaks the rules' : 'Damaged · chain broken' };
     var s = A.deriveState(record.events);
     if (!s.registered) return { key: 'open', label: 'Open, nothing sealed' };
     if (s.approval && s.issued.some(function (ev) { return ev.seq > s.approval.seq; })) return { key: 'issued', label: 'Issued' };
@@ -449,34 +459,40 @@
       app.innerHTML = '<section class="page narrow"><h1>No such record</h1><p>Records you start live in this browser only. <a href="#/records">See records</a>.</p></section>';
       return;
     }
-    var ro = !!record.sample;
     view = { recordId: record.id, head: headOf(record.events) };
+    var health = recordHealth(record);
+    // mode: 'sample' (read-only), 'damaged' (locked) or 'open'.
+    var mode = record.sample ? 'sample' : health.ok ? 'open' : 'damaged';
+    var ro = mode !== 'open';
     var s = A.deriveState(record.events);
-    var chain = A.checkChain(record.events);
+    var chain = health.chain;
     var claim = s.claim || record.claim || {};
-    var st = recordStatus(record);
+    var st = recordStatus(record, health);
     var concerns = A.deriveConcerns(s);
+    var firstProblem = (chain.problems[0] || health.rules.problems[0] || null);
 
     app.innerHTML =
       '<section class="page wide">' +
-        (ro ? '<div class="banner">Sample record · read-only. <a href="#/new">Start your own record</a> to seal events.</div>' : storageNote()) +
+        (mode === 'sample' ? '<div class="banner">Sample record · read-only. <a href="#/new">Start your own record</a> to seal events.</div>' : storageNote()) +
+        (mode === 'damaged' ? '<div class="concern-box damaged" role="alert"><strong>This record is damaged, so nothing more can be sealed or issued on it.</strong> ' +
+          'Line ' + esc(firstProblem.seq) + ': ' + esc(firstProblem.message) + ' Its lines were changed or removed outside allocycle, or were written by an older version with different rules. Packages downloaded earlier are unchanged.</div>' : '') +
         '<div class="page-head">' +
           '<div><p class="eyebrow">ALLOGENIC RECORD · ' + esc(record.id) + '</p>' +
           '<h1>' + esc(claim.project_name || 'Untitled record') + '</h1>' +
           '<p class="muted">' + esc(claim.batch || '') + (claim.protocol ? ' · ' + esc(claim.protocol) : '') + '</p></div>' +
           '<div class="head-pills"><span class="pill status-' + st.key + '">' + esc(st.label) + '</span>' +
-          '<span class="pill ' + (chain.pass ? 'pass' : 'fail') + '">' + (chain.pass ? 'Chain intact' : 'Chain broken') + '</span></div>' +
+          '<span class="pill ' + (health.ok ? 'pass' : 'fail') + '">' + (!chain.pass ? 'Chain broken' : health.ok ? 'Chain intact' : 'Breaks the rules') + '</span></div>' +
         '</div>' +
         '<div class="record-grid">' +
           '<div class="record-steps">' +
             stepClaim(record, s, ro) +
             stepRegister(record, s, ro) +
-            stepValidate(record, s, ro) +
-            stepApprove(record, s, ro) +
-            stepIssue(record, s, ro, concerns) +
-            stepCorrection(record, s, ro) +
+            stepValidate(record, s, mode) +
+            stepApprove(record, s, mode) +
+            stepIssue(record, s, mode, concerns) +
+            stepCorrection(record, s, mode) +
           '</div>' +
-          '<aside class="record-log">' + eventLog(record, chain) + '</aside>' +
+          '<aside class="record-log">' + eventLog(record, health) + '</aside>' +
         '</div>' +
       '</section>';
 
@@ -490,7 +506,7 @@
       : '<span class="pill muted-pill">Waiting</span>';
     return '<article class="card step step-' + state + '">' +
       '<header class="step-head"><span class="step-n">' + n + '</span><h2>' + esc(title) + '</h2>' + badge + '</header>' +
-      (sealedEv ? '<p class="sealed-line">Line ' + sealedEv.seq + ' · ' + esc(sealedEv.type) + ' · ' + fmtTime(sealedEv.sealed_at) + ' · ' + hashSpan(sealedEv.hash) + '</p>' : '') +
+      (sealedEv ? '<p class="sealed-line">Line ' + esc(sealedEv.seq) + ' · ' + esc(sealedEv.type) + ' · ' + fmtTime(sealedEv.sealed_at) + ' · ' + hashSpan(sealedEv.hash) + '</p>' : '') +
       body + '</article>';
   }
 
@@ -506,7 +522,7 @@
       return stepCard(1, 'One claim, one system', 'sealed',
         kv([['Project', c.project_name], ['Project / facility id', c.project_id], ['Registry face', faceLabel(c.registry_face)],
           ['Protocol / methodology', c.protocol], ['Batch / period', c.batch]]) +
-        '<p class="hint">Fixed by the Registered event on line ' + s.registered.seq + '.</p>');
+        '<p class="hint">Fixed by the Registered event on line ' + esc(s.registered.seq) + '.</p>');
     }
     return stepCard(1, 'One claim, one system', 'ready',
       '<form class="form" id="claim-form">' + claimFields(record.claim, ro) +
@@ -541,7 +557,8 @@
       '</form>');
   }
 
-  function stepValidate(record, s, ro) {
+  function stepValidate(record, s, mode) {
+    var ro = mode !== 'open';
     if (s.validated) {
       var p = s.validated.payload;
       return stepCard(3, 'Validate', 'sealed', kv([
@@ -550,7 +567,7 @@
       ]) + correctedNote(s, ['data_snapshot_hash', 'validation_type', 'validation_summary']), s.validated);
     }
     var blocked = A.canSeal(record.events, E.VALIDATED);
-    if (blocked || ro) return stepCard(3, 'Validate', 'waiting', '<p class="hint">' + esc(ro ? 'Not validated in this sample.' : blocked) + '</p>');
+    if (blocked || ro) return stepCard(3, 'Validate', 'waiting', '<p class="hint">' + esc(mode === 'sample' ? 'Not validated in this sample.' : mode === 'damaged' ? 'Locked: this record is damaged.' : blocked) + '</p>');
     return stepCard(3, 'Validate', 'ready',
       '<form class="form" id="validate-form">' +
         hashField('data_snapshot_hash', 'Data snapshot hash', '', '', 'SHA-256 of the data snapshot the system was validated on.') +
@@ -565,7 +582,8 @@
       '</form>');
   }
 
-  function stepApprove(record, s, ro) {
+  function stepApprove(record, s, mode) {
+    var ro = mode !== 'open';
     var body = '';
     if (s.approval) {
       var p = s.approval.payload;
@@ -574,10 +592,11 @@
       ]), s.approval);
     }
     if (s.staleApproval) {
-      body += '<p class="concern-box">The approval on line ' + s.staleApproval.seq + ' was sealed before the correction on line ' +
-        s.lastCorrectionSeq + '. A named person must approve the corrected record. Until then, downloads are draft packages.</p>';
+      body += '<p class="concern-box">The approval on line ' + esc(s.staleApproval.seq) + ' was sealed before the correction on line ' +
+        esc(s.lastCorrectionSeq) + '. A named person must approve the corrected record. Until then, downloads are draft packages.</p>';
     }
     var blocked = A.canSeal(record.events, E.APPROVED);
+    if (mode === 'damaged') return stepCard(4, 'Approve', 'waiting', body + '<p class="hint">Locked: this record is damaged.</p>');
     if (ro) return stepCard(4, 'Approve', 'concern', body + '<p class="concern-box">No “Approved for use” event. Downloads from this record are draft packages, and the missing named approval is a concern for the evaluator.</p>');
     if (blocked) return stepCard(4, 'Approve', 'waiting', body + '<p class="hint">' + esc(blocked) + ' Before an Approved for use event, downloads are draft packages.</p>');
     return stepCard(4, 'Approve', s.staleApproval ? 'concern' : 'ready', body +
@@ -590,7 +609,8 @@
       '</form>');
   }
 
-  function stepIssue(record, s, ro, concerns) {
+  function stepIssue(record, s, mode, concerns) {
+    var ro = mode !== 'open';
     var defaultFace = (s.claim || record.claim || {}).registry_face || 'isometric';
     var canIssue = !!s.approval;
     var faces = A.FACE_ORDER.slice().sort(function (a, b) { return (a === defaultFace ? -1 : 0) - (b === defaultFace ? -1 : 0); });
@@ -602,8 +622,10 @@
         return [k.replace(/_/g, ' '), Array.isArray(v) ? v.join(', ') : v];
       });
       var action;
-      if (ro) {
+      if (mode === 'sample') {
         action = stored ? '<button class="btn small" data-download-stored="' + face + '">Download ' + (stored.status === 'issued' ? 'issued' : 'draft') + ' package</button>' : '';
+      } else if (mode === 'damaged') {
+        action = '<p class="hint">Locked: this record is damaged.</p>';
       } else if (!s.registered) {
         action = '<p class="hint">Seal Register first.</p>';
       } else if (canIssue) {
@@ -611,7 +633,7 @@
       } else {
         action = '<button class="btn small" data-draft="' + face + '">Download draft package</button>';
       }
-      if (!ro && stored) {
+      if (mode !== 'sample' && stored) {
         action += ' <button class="btn small ghost" data-download-stored="' + face + '">Re-download last ' + esc(stored.status) + ' (' + esc(stored.package_hash.slice(0, 8)) + ')</button>';
       }
       return '<div class="face' + (face === defaultFace ? ' face-default' : '') + '">' +
@@ -628,19 +650,21 @@
   }
 
   function correctedNote(s, fields) {
-    var hits = s.corrections.filter(function (ev) { return fields.indexOf(ev.payload.field) !== -1; });
+    var hits = s.corrections.filter(function (ev) {
+      return ev.payload && typeof ev.payload.field === 'string' && fields.indexOf(ev.payload.field) !== -1;
+    });
     if (!hits.length) return '';
     return '<div class="correction-note"><strong>Superseded by later lines</strong><ul>' + hits.map(function (ev) {
       var spec = A.CORRECTABLE[ev.payload.field];
       var v = spec.isHash ? hashSpan(ev.payload.value, 12) : esc(ev.payload.value);
-      return '<li>Line ' + ev.seq + ': ' + esc(spec.label) + ' → ' + v + '</li>';
+      return '<li>Line ' + esc(ev.seq) + ': ' + esc(spec.label) + ' → ' + v + '</li>';
     }).join('') + '</ul><p class="hint">The sealed line above is unchanged. Correction lines sit on top of it.</p></div>';
   }
 
-  function stepCorrection(record, s, ro) {
-    if (ro || !s.registered) {
+  function stepCorrection(record, s, mode) {
+    if (mode !== 'open' || !s.registered) {
       return '<article class="card step step-muted"><header class="step-head"><span class="step-n">±</span><h2>Record a change</h2></header>' +
-        '<p class="hint">' + (ro ? 'Sample records are read-only.' : 'A change in the team’s process is recorded as a new Correction event. Available after Register.') + '</p></article>';
+        '<p class="hint">' + (mode === 'sample' ? 'Sample records are read-only.' : mode === 'damaged' ? 'Locked: this record is damaged.' : 'A change in the team’s process is recorded as a new Correction event. Available after Register.') + '</p></article>';
     }
     var opts = Object.keys(A.CORRECTABLE).filter(function (k) {
       var need = A.CORRECTABLE[k].needs;
@@ -659,22 +683,37 @@
       '</form></article>';
   }
 
-  function eventLog(record, chain) {
+  var EVENT_CLASS = {};
+  EVENT_CLASS[E.REGISTERED] = 'registered';
+  EVENT_CLASS[E.VALIDATED] = 'validated';
+  EVENT_CLASS[E.APPROVED] = 'approved-for-use';
+  EVENT_CLASS[E.CORRECTION] = 'correction';
+  EVENT_CLASS[E.ISSUED] = 'package-issued';
+
+  function eventLog(record, health) {
+    var chain = health.chain;
     var bad = {};
-    chain.problems.forEach(function (p) { bad[p.seq] = p.message; });
-    var items = record.events.map(function (ev) {
-      return '<li class="ev ev-' + ev.type.toLowerCase().replace(/\s+/g, '-') + (bad[ev.seq] ? ' ev-bad' : '') + '">' +
-        '<div class="ev-head"><span class="ev-seq">' + ev.seq + '</span><span class="ev-type">' + esc(ev.type) + '</span>' +
-        '<time>' + fmtTime(ev.sealed_at) + '</time></div>' +
-        '<div class="ev-hashes"><span>prev ' + hashSpan(ev.prev_hash, 8) + '</span><span>hash ' + hashSpan(ev.hash, 8) + '</span></div>' +
-        (bad[ev.seq] ? '<p class="fail-text">' + esc(bad[ev.seq]) + '</p>' : '') +
-        '<details><summary>Payload</summary><pre>' + esc(JSON.stringify(ev.payload, null, 2)) + '</pre></details></li>';
+    chain.problems.concat(health.rules.problems).forEach(function (p) {
+      bad[p.seq] = (bad[p.seq] ? bad[p.seq] + ' ' : '') + p.message;
+    });
+    var items = record.events.map(function (ev, i) {
+      var line = i + 1;
+      var e = ev !== null && typeof ev === 'object' ? ev : {};
+      var cls = typeof e.type === 'string' && Object.prototype.hasOwnProperty.call(EVENT_CLASS, e.type) ? EVENT_CLASS[e.type] : 'unknown';
+      return '<li class="ev ev-' + cls + (bad[line] ? ' ev-bad' : '') + '">' +
+        '<div class="ev-head"><span class="ev-seq">' + line + '</span><span class="ev-type">' + esc(e.type) + '</span>' +
+        '<time>' + fmtTime(e.sealed_at) + '</time></div>' +
+        '<div class="ev-hashes"><span>prev ' + hashSpan(e.prev_hash, 8) + '</span><span>hash ' + hashSpan(e.hash, 8) + '</span></div>' +
+        (bad[line] ? '<p class="fail-text">' + esc(bad[line]) + '</p>' : '') +
+        '<details><summary>Details</summary><dl class="kv full-hashes"><dt>hash</dt><dd><code class="hash full">' + esc(e.hash) + '</code></dd>' +
+          '<dt>prev</dt><dd><code class="hash full">' + esc(e.prev_hash) + '</code></dd></dl>' +
+          '<pre>' + esc(JSON.stringify(e.payload, null, 2)) + '</pre></details></li>';
     }).join('');
     return '<div class="card log">' +
       '<header class="log-head"><h2>Event log</h2><span class="muted small">append-only</span></header>' +
       '<p class="hint">Each line is sealed with SHA-256 over its contents and the hash of the line before it.</p>' +
       (items ? '<ol class="events">' + items + '</ol>' : '<p class="empty">No events yet. Sealing Register writes line 1.</p>') +
-      '<p class="chain-head">Chain head ' + hashSpan(chain.head, 10) + '</p></div>';
+      '<p class="chain-head">Chain head <code class="hash full">' + esc(chain.head) + '</code></p></div>';
   }
 
   function bindRecord(record) {

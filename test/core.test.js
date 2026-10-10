@@ -176,7 +176,7 @@ test('verify replays the rules: unknown types and invalid lines are reported', (
   let r = A.verifyPackage(pkgOf(unknown));
   assert.ok(r.hash.pass && r.chain.pass && r.consistency.pass);
   assert.strictEqual(r.rules.pass, false);
-  assert.match(r.rules.problems[0].message, /Line 2 \(Observed\): unknown event type/);
+  assert.match(r.rules.problems[0].message, /Line 2 \("Observed"\): unknown event type/);
 
   const badPayload = chain([[A.EVENT.REGISTERED, REG], [A.EVENT.VALIDATED, { ...VAL, validation_type: 'not-a-type' }]], A.sealUnchecked);
   r = A.verifyPackage(pkgOf(badPayload));
@@ -386,4 +386,42 @@ test('replaying the rules is linear: 20,000 lines check quickly', () => {
   const r = A.checkRules(ev);
   assert.ok(r.pass, JSON.stringify(r.problems.slice(0, 2)));
   assert.ok(Date.now() - t0 < 3000, 'took ' + (Date.now() - t0) + ' ms');
+});
+
+/* ---- App review batch 2: nothing is sealed on a damaged record ---- */
+
+test('sealing refuses a record whose chain is broken or that breaks the rules', () => {
+  const ev = chain([[A.EVENT.REGISTERED, REG], [A.EVENT.VALIDATED, VAL]]);
+  const edited = ev.map((e) => ({ ...e }));
+  edited[1] = { ...edited[1], payload: { ...edited[1].payload, summary: 'changed' } };
+  assert.match(A.checkSeal(edited, { type: A.EVENT.APPROVED, at: AT, payload: APPR }), /chain is broken \(line 2: Event hash/);
+  const removed = [ev[0], ev[1]].slice(1);
+  assert.match(A.checkSeal(removed, { type: A.EVENT.APPROVED, at: AT, payload: APPR }), /chain is broken \(line 1/);
+  // A legacy line that no longer meets the rules (Registered without inputs).
+  const { inputs, ...legacy } = REG;
+  const old = chain([[A.EVENT.REGISTERED, legacy]], A.sealUnchecked);
+  assert.match(A.checkSeal(old, { type: A.EVENT.CORRECTION, at: AT, payload: { field: 'inputs', value: 'x', reason: 'r' } }), /breaks the event rules/);
+});
+
+test('chain problems are located by position, and odd envelope values are described safely', () => {
+  const pkg = JSON.parse(sample('issued'));
+  pkg.events[2].seq = 99;
+  pkg.events[0].seq = { a: 1 };
+  pkg.package_hash = A.packageHash(pkg);
+  const r = A.verifyPackage(pkg);
+  assert.deepStrictEqual([...new Set(r.chain.problems.map((p) => p.seq))], [1, 3]);
+  assert.ok(r.chain.problems.some((p) => p.message === 'Sequence number is an object, expected 1.'));
+  assert.ok(r.rules.problems.some((p) => /seq must be a whole number/.test(p.message)));
+  const typed = JSON.parse(sample('issued'));
+  typed.events[0].type = ['Registered'];
+  const t = A.verifyPackage(typed);
+  assert.ok(t.rules.problems.some((p) => /type must be text|unknown event type/.test(p.message)));
+});
+
+test('a Correction without previous no longer causes a false outline mismatch', () => {
+  const ev = chain([[A.EVENT.REGISTERED, REG]]);
+  ev.push(A.sealUnchecked(ev, { type: A.EVENT.CORRECTION, at: AT, payload: { field: 'ai_version', value: '2', reason: 'r' } }));
+  const r = A.verifyPackage(JSON.stringify(pkgOf(ev)));
+  assert.deepStrictEqual(r.consistency.diffs, []);
+  assert.ok(r.rules.problems.some((p) => /Previous value is missing/.test(p.message)));
 });

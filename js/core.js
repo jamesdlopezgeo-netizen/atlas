@@ -177,8 +177,10 @@
     return copy;
   }
 
+  // Own keys only, and only real string keys: a list like ["Registered"]
+  // must not pass as the key "Registered".
   function hasOwn(obj, key) {
-    return Object.prototype.hasOwnProperty.call(obj, key);
+    return typeof key === 'string' && Object.prototype.hasOwnProperty.call(obj, key);
   }
 
   function normalizeHash(raw) {
@@ -215,6 +217,17 @@
   // trust: if the caller leaves it out it is filled in, and if the caller
   // supplies one it must match.
   function prepareSeal(events, spec) {
+    // Nothing is sealed on top of a record that is already damaged: a new
+    // line would link to a hash that does not match, or carry on from lines
+    // that break the rules.
+    var chain = checkChain(events);
+    if (!chain.pass) {
+      return { error: 'Nothing can be sealed on this record: its chain is broken (line ' + chain.problems[0].seq + ': ' + chain.problems[0].message + ').' };
+    }
+    var rules = checkRules(events);
+    if (!rules.pass) {
+      return { error: 'Nothing can be sealed on this record: it breaks the event rules (' + rules.problems[0].message + ').' };
+    }
     if (!isPlainObject(spec.payload)) return { error: 'The payload must be an object.' };
     var payload;
     try {
@@ -251,32 +264,38 @@
     return ev;
   }
 
-  function currentValue(events, field) {
-    return valueIn(deriveState(events), field);
-  }
-
   function valueIn(s, field) {
     if (!hasOwn(CORRECTABLE, field)) return undefined;
     var spec = CORRECTABLE[field];
     return s[spec.section] ? s[spec.section][spec.key] : undefined;
   }
 
+  // Problems are located by position in the list (line 1, 2, ...), never
+  // by the seq number the line claims for itself.
   function checkChain(events) {
     var problems = [];
     var prev = GENESIS;
     (events || []).forEach(function (ev, i) {
+      var line = i + 1;
       if (!isPlainObject(ev)) {
-        problems.push({ seq: i + 1, message: 'Line ' + (i + 1) + ' is not an event object.' });
+        problems.push({ seq: line, message: 'Not an event object.' });
         prev = null;
         return;
       }
-      if (ev.seq !== i + 1) problems.push({ seq: ev.seq, message: 'Sequence number is ' + ev.seq + ', expected ' + (i + 1) + '.' });
-      if (ev.prev_hash !== prev) problems.push({ seq: ev.seq, message: 'prev_hash does not match the hash of the line before it.' });
+      if (ev.seq !== line) problems.push({ seq: line, message: 'Sequence number is ' + describe(ev.seq) + ', expected ' + line + '.' });
+      if (ev.prev_hash !== prev) problems.push({ seq: line, message: 'prev_hash does not match the hash of the line before it.' });
       var recomputed = eventHash(ev);
-      if (recomputed !== ev.hash) problems.push({ seq: ev.seq, message: 'Event hash does not match its contents.' });
+      if (recomputed !== ev.hash) problems.push({ seq: line, message: 'Event hash does not match its contents.' });
       prev = ev.hash;
     });
     return { pass: problems.length === 0, problems: problems, head: prev };
+  }
+
+  // A short, safe description of a value from an untrusted file.
+  function describe(v) {
+    if (typeof v === 'number' || typeof v === 'boolean' || v === null) return String(v);
+    if (typeof v === 'string') return JSON.stringify(v.length > 40 ? v.slice(0, 40) + '…' : v);
+    return Array.isArray(v) ? 'a list' : typeof v === 'object' ? 'an object' : typeof v;
   }
 
   /* ------------------------------------------------------------------ */
@@ -485,8 +504,9 @@
         return null;
       }
       if (rule === 'derived') {
+        if (v === undefined) return 'Previous value is missing.';
         var current = valueIn(s, p.field);
-        return v === current ? null : 'Previous value does not match the record (the record has ' + JSON.stringify(current) + ').';
+        return v === current ? null : 'Previous value does not match the record (the record has ' + describe(current) + ').';
       }
       if (rule === 'correction_value') {
         if (typeof v !== 'string') return 'New value must be text.';
@@ -509,6 +529,9 @@
     if (extra.length) return 'unknown field' + (extra.length > 1 ? 's ' : ' ') + extra.join(', ') + '.';
     var missing = ENVELOPE_KEYS.filter(function (k) { return keys.indexOf(k) === -1; });
     if (missing.length) return 'missing field' + (missing.length > 1 ? 's ' : ' ') + missing.join(', ') + '.';
+    if (!Number.isInteger(ev.seq)) return 'seq must be a whole number.';
+    if (typeof ev.type !== 'string') return 'type must be text.';
+    if (!/^[0-9a-f]{64}$/.test(ev.prev_hash) || !/^[0-9a-f]{64}$/.test(ev.hash)) return 'prev_hash and hash must be SHA-256 hex.';
     if (!isIsoTime(ev.sealed_at)) return 'sealed_at must be an ISO 8601 date and time.';
     if (!nonEmptyText(ev.recorded_by)) return 'recorded_by must be non-empty text.';
     return null;
@@ -517,11 +540,15 @@
   // Replays the envelope, order and payload rules over a whole chain in one
   // pass, each line against the state before it. An unknown event type is a
   // problem, never silently skipped.
+  function describeType(t) {
+    return hasOwn(PAYLOAD_RULES, t) ? t : describe(t);
+  }
+
   function checkRules(events) {
     var problems = [];
     var s = newState();
     (events || []).forEach(function (ev, i) {
-      var label = isPlainObject(ev) && typeof ev.type === 'string' ? ' (' + ev.type + ')' : '';
+      var label = isPlainObject(ev) && typeof ev.type === 'string' ? ' (' + describeType(ev.type) + ')' : '';
       var where = 'Line ' + (i + 1) + label + ': ';
       if (!isPlainObject(ev)) { problems.push({ seq: i + 1, message: where + 'not an event object.' }); return; }
       var why = checkEnvelope(ev);
@@ -673,7 +700,7 @@
       face: face,
       status: status,
       status_note: statusNote(status),
-      cover_sheet: coverSheet(state.claim || opts.claim, face),
+      cover_sheet: coverSheet(state.claim, face),
       outline: deriveOutline(events),
       concerns: deriveConcerns(state),
       events: clone(events),
@@ -696,7 +723,9 @@
   function flatten(value, prefix, out) {
     out = out || {};
     if (value !== null && typeof value === 'object') {
-      var keys = Array.isArray(value) ? value.map(function (_, i) { return i; }) : Object.keys(value);
+      // Undefined members are absent, as they are in canonical JSON.
+      var keys = Array.isArray(value) ? value.map(function (_, i) { return i; })
+        : Object.keys(value).filter(function (k) { return value[k] !== undefined; });
       if (!keys.length) out[prefix] = Array.isArray(value) ? '[]' : '{}';
       keys.forEach(function (k) {
         var path = Array.isArray(value) ? prefix + '[' + k + ']' : (prefix ? prefix + '.' + k : String(k));
