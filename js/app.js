@@ -1010,7 +1010,7 @@
         '<p class="sim-label">SIMULATED AGENTS · NOT A REAL CREDIT</p>' +
         '<h1>Live agents</h1>' +
         '<p class="muted">Playback writes steps as they happen, standing in for the Autogenic connector, the team’s log and the named person. Each line is hashed onto the line before it (SHA-256 chain). It does not call a real model or issue a package.</p>' +
-        '<p class="hint">The connector only records what it <em>observed</em>: a version at the bound location and the hash it computed. Lines marked <em>reported</em> come from the team’s own log. Only a named <em>person</em> turns an observation into a claim.</p>' +
+        '<p class="hint">The connector only records what it <em>observed</em>: a version at the bound location and the hash it computed. Lines marked <em>reported</em> come from the team’s own log. Only a named <em>person</em> (here a sample name) turns an observation into a claim.</p>' +
         '<div class="cases" role="group" aria-label="Cases">' + CASES.map(function (c) {
           return '<button class="case' + (c.id === current.id ? ' active' : '') + '"' + (c.id === current.id ? ' aria-current="true"' : '') + ' data-case="' + c.id + '">' +
             '<span class="case-tag">' + esc(c.tag) + '</span><span class="case-title">' + esc(c.title) + '</span>' +
@@ -1062,6 +1062,7 @@
         '<span class="t-hash">' + hashSpan(line.hash, 8) + '<span class="muted"> ← ' + esc(line.prev_hash.slice(0, 6)) + '</span></span>';
       term.appendChild(li);
       term.scrollTop = term.scrollHeight;
+      $('#recheck-out').textContent = ''; // an earlier recheck no longer covers the chain
       $('#sim-head').innerHTML = 'Chain head ' + hashSpan(line.hash, 10) + ' · ' + lines.length + ' line' + (lines.length === 1 ? '' : 's');
     }
     function tick() {
@@ -1103,7 +1104,11 @@
       runBtn.textContent = 'Pause';
       tick();
     });
-    $('#speed').addEventListener('change', function (e) { speed = Number(e.target.value) || 1; });
+    // A new speed applies to the line already waiting, too.
+    $('#speed').addEventListener('change', function (e) {
+      speed = Number(e.target.value) || 1;
+      if (running) { clearTimeout(timer); tick(); }
+    });
     $('#reset').addEventListener('click', reset);
     $('#recheck').addEventListener('click', function () {
       var prev = A.GENESIS, ok = true;
@@ -1117,7 +1122,10 @@
         : '<span class="fail-text">Chain broken.</span>';
     });
     $$('[data-case]').forEach(function (b) {
-      b.addEventListener('click', function () { location.hash = '#/agents/' + b.getAttribute('data-case'); });
+      // The case already shown keeps its playback; another case opens fresh.
+      b.addEventListener('click', function () {
+        if (b.getAttribute('data-case') !== current.id) location.hash = '#/agents/' + b.getAttribute('data-case');
+      });
     });
     updateProgress();
     cleanup = function () { clearTimeout(timer); };
