@@ -16,6 +16,8 @@ npm test             # node test runner: hashing, chain, verify, samples
 npm run build:samples
 ```
 
+Brand fonts load from Google Fonts when you're online. Offline, system fonts stand in.
+
 ## Pages
 
 | Route | What it does |
@@ -61,4 +63,5 @@ The three sample files are frozen test vectors for format `allocycle.package/v1`
 - `js/app.js`: router and views
 - `js/agent-cases.js`: scripted playback cases
 - `js/samples-data.js`: generated sample records and packages
-- `css/style.css`: styles (light and dark)
+- `css/style.css`: styles (light and dark) built on the brand tokens
+- `brand/`: logo, mark, app icons, favicon, and the brand rules (color meanings, type, usage) in `brand/README.md`

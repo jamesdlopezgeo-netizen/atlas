@@ -333,7 +333,7 @@
   }
 
   function stepCard(n, title, state, body, sealedEv) {
-    var badge = state === 'sealed' ? '<span class="pill pass">Sealed</span>'
+    var badge = state === 'sealed' ? '<span class="pill sealed">Sealed</span>'
       : state === 'ready' ? '<span class="pill">Ready</span>'
       : state === 'concern' ? '<span class="pill concern">Concern</span>'
       : '<span class="pill muted-pill">Waiting</span>';
