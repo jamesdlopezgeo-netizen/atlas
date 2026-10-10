@@ -6,6 +6,8 @@
   "scripts": {
     "build:samples": "node scripts/build-samples.js",
     "test": "node --test test/*.test.js",
+    "test:core": "node --test test/core.test.js",
+    "test:app": "node --test test/app.test.js",
     "start": "python3 -m http.server 8080"
   }
 }

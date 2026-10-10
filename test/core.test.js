@@ -101,7 +101,7 @@ test('the Python one-liner on the Verify page recomputes the same hash', (t) => 
 
 test('sample files are up to date with the builder', () => {
   const before = ['issued', 'unapproved', 'altered'].map(sample);
-  execFileSync('node', [path.join(__dirname, '..', 'scripts', 'build-samples.js')]);
+  execFileSync('node', [path.join(__dirname, '..', 'scripts', 'build-samples.js'), '--check']);
   assert.deepStrictEqual(['issued', 'unapproved', 'altered'].map(sample), before);
 });
 
@@ -235,14 +235,17 @@ test('verify dispatches on format and survives malformed events', () => {
 
 test('frozen v1 vectors: builder reproduces them and never rewrites them', () => {
   const dir = path.join(__dirname, '..', 'samples');
-  const before = ['issued', 'unapproved', 'altered'].map((n) => fs.statSync(path.join(dir, n + '.json')).mtimeMs);
-  execFileSync('node', [path.join(__dirname, '..', 'scripts', 'build-samples.js')]);
-  const after = ['issued', 'unapproved', 'altered'].map((n) => fs.statSync(path.join(dir, n + '.json')).mtimeMs);
+  const names = ['issued', 'unapproved', 'altered', 'issued-verra', 'issued-puro'];
+  const before = names.map((n) => fs.statSync(path.join(dir, n + '.json')).mtimeMs).concat(fs.statSync(path.join(__dirname, '..', 'js', 'samples-data.js')).mtimeMs);
+  execFileSync('node', [path.join(__dirname, '..', 'scripts', 'build-samples.js'), '--check']);
+  const after = names.map((n) => fs.statSync(path.join(dir, n + '.json')).mtimeMs).concat(fs.statSync(path.join(__dirname, '..', 'js', 'samples-data.js')).mtimeMs);
   assert.deepStrictEqual(after, before);
   // Hashes pinned so an accidental change to the vectors, hashing or derivation is caught.
   const pinned = {
     issued: '07bb844a71256f33a09bc22aa085fb009e671f81adfe08f29c68e83b8450dd7f',
-    unapproved: 'abda09474f8fc0b1d3d96c5a1aa2f81adf68a79e14ab18cba65d800ef901d995'
+    unapproved: 'abda09474f8fc0b1d3d96c5a1aa2f81adf68a79e14ab18cba65d800ef901d995',
+    'issued-verra': 'd2d6273acdc8df1050c46fe56ecd2abce98dcafdb269548410e9bad212687147',
+    'issued-puro': '72fd27a4ab66181ebdb714078a0212d6345e52a9b3f338ca859eaf3916f6a9fb'
   };
   for (const [name, hash] of Object.entries(pinned)) {
     assert.strictEqual(JSON.parse(sample(name)).package_hash, hash);
@@ -253,7 +256,9 @@ test('frozen v1 vectors: builder reproduces them and never rewrites them', () =>
   const fileDigests = {
     issued: 'c7025696ca6a8e091b94fc85b051b401a10e7fbc2ede2c8fd233dbf479459271',
     unapproved: '38ad7d7cbadeed10496457dfb2016e6a653b8e050f9f48b237e3556784005091',
-    altered: 'fad648e3edfc76c17173c014980eeee3581a8c67fb066c17a5d392e4a6082c0d'
+    altered: 'fad648e3edfc76c17173c014980eeee3581a8c67fb066c17a5d392e4a6082c0d',
+    'issued-verra': '0508b5cf0666d5c5baea218ed7d8a117bb9c89bc42796be45b4f8bbdccd6203c',
+    'issued-puro': '8066053fc2e06c3c1302b33227f1b10ae47a287c62cd5aca5d4579b1131c70f6'
   };
   for (const [name, digest] of Object.entries(fileDigests)) {
     assert.strictEqual(A.sha256Bytes(fs.readFileSync(path.join(dir, name + '.json'))), digest, name + '.json bytes changed');
@@ -492,4 +497,41 @@ test('an approval entered in the same minute as registration is accepted', () =>
   const at = '2026-01-01T10:01:00Z';
   assert.strictEqual(A.checkSeal(ev, { type: A.EVENT.APPROVED, at, payload: { ...APPR, approved_at: '2026-01-01T10:00:00Z' } }), null);
   assert.match(A.checkSeal(ev, { type: A.EVENT.APPROVED, at, payload: { ...APPR, approved_at: '2026-01-01T09:59:59Z' } }), /earlier than the Registered line/);
+});
+
+/* ---- App review batch 7 ---- */
+
+test('every frozen vector verifies, including the Verra and Puro faces', () => {
+  for (const name of ['issued', 'unapproved', 'issued-verra', 'issued-puro']) {
+    const r = A.verifyPackage(sample(name));
+    assert.ok(r.consistent, name);
+  }
+  assert.strictEqual(JSON.parse(sample('issued-verra')).cover_sheet.methodology, 'VM0049');
+  assert.ok('monitoring_period' in JSON.parse(sample('issued-verra')).cover_sheet);
+  assert.ok('production_batch' in JSON.parse(sample('issued-puro')).cover_sheet);
+});
+
+test('the correction playback cites the right lines', () => {
+  global.window = { Allocycle: A };
+  delete require.cache[require.resolve('../js/agent-cases.js')];
+  require('../js/agent-cases.js');
+  const steps = global.window.ALLOCYCLE_CASES.find((c) => c.id === 'correction').steps;
+  delete global.window;
+  const kindAt = (line) => steps[line - 1] && steps[line - 1].kind;
+  for (const [i, st] of steps.entries()) {
+    const corrects = /corrects line (\d+)/.exec(st.text);
+    if (corrects) assert.match(steps[+corrects[1] - 1].text, /^Registered/, 'step ' + (i + 1));
+    const cites = /cites lines? (\d+)(?: and (\d+))?/.exec(st.text);
+    if (cites) {
+      assert.strictEqual(kindAt(+cites[1]), 'observed', 'step ' + (i + 1));
+      if (cites[2]) assert.strictEqual(kindAt(+cites[2]), 'reported', 'step ' + (i + 1));
+    }
+    const classifies = /classifies line (\d+).*line (\d+)/.exec(st.text);
+    if (classifies) {
+      assert.strictEqual(kindAt(+classifies[1]), 'observed');
+      assert.strictEqual(kindAt(+classifies[2]), 'reported');
+    }
+    const before = /sealed before line (\d+)/.exec(st.text);
+    if (before) assert.strictEqual(kindAt(+before[1]), 'correction');
+  }
 });
