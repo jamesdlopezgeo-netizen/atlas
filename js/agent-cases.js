@@ -66,9 +66,11 @@
         { agent: 'record', kind: 'sealed', wait: 600, text: 'Registered: "Plume dispersion surrogate" v2.3.0.' },
         { agent: 'team: surrogate', kind: 'reported', wait: 1000, text: 'Team log: screening run complete.' },
         { agent: 'connector', kind: 'observed', wait: 1100, text: 'New version at the bound location: v2.3.1. sha256 ' + short(h('plume-2.3.1')) + '. Recorded as an observation, not a correction: a new file does not show which one the run used.' },
-        { agent: 'person', kind: 'person', wait: 1000, text: 'Claim opener classifies line 5: the run used v2.3.1 (the team re-exported it; the team’s own log says so).' },
-        { agent: 'record', kind: 'correction', wait: 800, text: 'Correction (corrects line 3, cites line 5): version v2.3.0 → v2.3.1. Line 3 is not edited.' },
-        { agent: 'record', kind: 'note', wait: 900, text: 'Line 3 still hashes to the same value. Any approval sealed before line 7 is now out of date and needs a new named approval.' }
+        { agent: 'team: surrogate', kind: 'reported', wait: 1000, text: 'Team log: the model was re-exported as v2.3.1; the screening run used v2.3.1.' },
+        { agent: 'person', kind: 'person', wait: 1000, text: 'Claim opener classifies line 5 as used for this batch, citing the team log on line 6.' },
+        { agent: 'record', kind: 'correction', wait: 800, text: 'Correction (corrects line 3, cites lines 5 and 6): version v2.3.0 → v2.3.1. Line 3 is not edited.' },
+        { agent: 'record', kind: 'correction', wait: 700, text: 'Correction (corrects line 3, cites line 5): artifact hash ' + short(h('plume-2.3.0')) + ' → ' + short(h('plume-2.3.1')) + '. One field per correction.' },
+        { agent: 'record', kind: 'note', wait: 900, text: 'Line 3 still hashes to the same value. Any approval sealed before line 8 is now out of date and needs a new named approval.' }
       ]
     }
   ];

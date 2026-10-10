@@ -29,7 +29,7 @@ npm run build:samples
 ## Rules the code enforces
 
 - **Append-only.** The only write path seals a new event (`appendEvent` in `js/app.js`, which calls `sealEvent` in `js/core.js`). Each event's hash covers its contents and the previous event's hash. A correction is a new `Correction` event; earlier lines stay as they were.
-- **One set of rules, in core.** `sealEvent` runs the order rules (`canSeal`: `Registered` fixes the claim → `Validated` → `Approved for use` → `Package issued`) and the payload rules (`validateEvent`: a per-type field allowlist, hash format, validation types, registry faces, which fields a Correction may change and when, no no-op corrections). A Correction's `previous` value is derived from the record, never taken from the caller. The form, the sample builder and any later connector all go through this one path.
+- **One set of rules, in core.** `sealEvent` runs the order rules (`canSeal`: `Registered` fixes the claim → `Validated` → `Approved for use` → `Package issued`) the payload rules (`validateEvent`: a per-type field allowlist, hash format, validation types, registry faces, real calendar dates, well-formed text, which fields a Correction may change and when, no no-op corrections) and the envelope rules (exact event fields, an ISO 8601 seal time, a non-empty `recorded_by`). A Correction's `previous` value is derived from the record, never taken from the caller. The form, the sample builder and any later connector all go through this one path.
 - **Issued vs draft.** A package is `issued` only when the record has a current `Approved for use` event and a `Package issued` event for that face after it. Otherwise it is a draft package, and the concerns list says why (`MISSING_APPROVAL`, or `APPROVAL_PRECEDES_CORRECTION` if a correction came after the approval).
 - **Three faces.** Isometric (default; labeled `G-K6MR-0`, `G-6VGD-0`), Verra (project id, `VM0049`, monitoring period), Puro (facility id, methodology, production batch).
 
@@ -37,13 +37,13 @@ npm run build:samples
 
 `package_hash` = SHA-256 (hex) of the canonical JSON of the package: object keys sorted, whitespace between tokens removed, the top-level `package_hash` field excluded. Verify recomputes it the same way.
 
-For the values allocycle seals (strings, booleans, null, integers, ASCII keys), this canonical form is the same as RFC 8785 (JCS), and Python's `json.dumps(sort_keys=True, separators=(',', ':'), ensure_ascii=False)` produces it too. That equivalence is not general: it can break for floats, lone surrogates, and keys outside the Basic Multilingual Plane, none of which allocycle writes. For allocycle packages:
+For the values allocycle writes (text, booleans, null, small integers, ASCII keys), this canonical form is the same as RFC 8785 (JCS), and Python's `json.dumps(sort_keys=True, separators=(',', ':'), ensure_ascii=False)` produces it too. Outside those values the forms can differ: Python's output differs for floats, integers above 2^53 and keys outside the Basic Multilingual Plane; JCS differs only for unpaired surrogates, which allocycle refuses to seal. For allocycle packages:
 
 ```sh
 python3 -c "import json,hashlib,sys; d=json.load(open(sys.argv[1])); h=d.pop('package_hash'); c=json.dumps(d,sort_keys=True,separators=(',',':'),ensure_ascii=False); print(h==hashlib.sha256(c.encode()).hexdigest())" samples/issued.json
 ```
 
-Verify also re-checks the event chain, replays every line against the order and payload rules (an unknown event type is reported, never skipped), and re-derives the outline, cover sheet, concerns and status from the sealed events, so a changed field is located, not only detected. A file shows the record only up to its last line, so Verify reports status "as of line N".
+Verify also re-checks the event chain, replays every line against the envelope, order and payload rules in one pass (an unknown event type is reported, never skipped; a malformed line fails the checks rather than switching them off), and re-derives the outline, cover sheet, concerns and status from the sealed events, so a changed field is located, not only detected. A file shows the record only up to its last line, so Verify reports status "as of line N", and it shows the status the events support, noting when the file claims a different one.
 
 **What a passing hash does not show.** A changed field fails, unless whoever changed it also rewrote the hash. The hash rule is published and packages are not signed yet, so anyone can build a file that passes every check. Verify says so: it reports "hash matches (origin not checked)", and treats `recorded_by` and the approver's name as self-asserted ("name as entered, not verified"). Signing packages is planned before any real team data is used.
 

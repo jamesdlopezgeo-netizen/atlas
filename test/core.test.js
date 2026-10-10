@@ -213,12 +213,24 @@ test('verify dispatches on format and survives malformed events', () => {
   assert.strictEqual(r.checked, false);
   assert.match(r.reason, /Unknown package format/);
 
+  // A malformed v1 file fails its checks; it is never merely "not checked".
   const broken = JSON.parse(sample('issued'));
   broken.events[1] = null;
   r = A.verifyPackage(broken);
-  assert.ok(r.ok);
-  assert.strictEqual(r.checked, false);
+  assert.ok(r.ok && r.checked);
   assert.strictEqual(r.hash.pass, false);
+  assert.strictEqual(r.chain.pass, false);
+  assert.strictEqual(r.rules.pass, false);
+  assert.strictEqual(r.consistent, false);
+
+  const noEvents = JSON.parse(sample('issued'));
+  delete noEvents.events;
+  noEvents.package_hash = A.packageHash(noEvents);
+  r = A.verifyPackage(noEvents);
+  assert.ok(r.checked && r.hash.pass);
+  assert.strictEqual(r.chain.pass, false);
+  assert.strictEqual(r.rules.pass, false);
+  assert.strictEqual(r.status.derived, 'draft');
 });
 
 test('frozen v1 vectors: builder reproduces them and never rewrites them', () => {
@@ -237,4 +249,141 @@ test('frozen v1 vectors: builder reproduces them and never rewrites them', () =>
     assert.strictEqual(A.verifyPackage(sample(name)).hash.recomputed, hash);
   }
   assert.strictEqual(JSON.parse(sample('altered')).package_hash, pinned.issued);
+  // And the exact bytes of each file, independent of the builder.
+  const fileDigests = {
+    issued: 'c7025696ca6a8e091b94fc85b051b401a10e7fbc2ede2c8fd233dbf479459271',
+    unapproved: '38ad7d7cbadeed10496457dfb2016e6a653b8e050f9f48b237e3556784005091',
+    altered: 'fad648e3edfc76c17173c014980eeee3581a8c67fb066c17a5d392e4a6082c0d'
+  };
+  for (const [name, digest] of Object.entries(fileDigests)) {
+    assert.strictEqual(A.sha256Bytes(fs.readFileSync(path.join(dir, name + '.json'))), digest, name + '.json bytes changed');
+  }
+});
+
+/* ---- Fixes from the step 0 review ---- */
+
+function rehash(pkg, events) {
+  pkg.events = events;
+  pkg.event_chain_head = events.length ? events[events.length - 1].hash : A.GENESIS;
+  pkg.package_hash = A.packageHash(pkg);
+  return JSON.parse(JSON.stringify(pkg));
+}
+const resealed = (mutate) => {
+  const pkg = JSON.parse(sample('issued'));
+  const out = [];
+  pkg.events.forEach((ev, i) => {
+    const spec = { type: ev.type, at: ev.sealed_at, payload: ev.payload };
+    mutate(spec, i);
+    out.push(A.sealUnchecked(out, spec));
+  });
+  return rehash(pkg, out);
+};
+
+test('a null payload cannot hide rule or chain failures behind "not checked"', () => {
+  for (const line of [2, 3]) { // Correction, Approved for use
+    const r = A.verifyPackage(resealed((spec, i) => { if (i === line) spec.payload = null; }));
+    assert.ok(r.checked, 'line ' + (line + 1));
+    assert.strictEqual(r.rules.pass, false);
+    assert.ok(r.rules.problems.some((p) => /payload must be an object/.test(p.message)));
+    assert.strictEqual(r.consistent, false);
+  }
+  // Registered + Issued with no approval, plus a null-payload approval line.
+  const ev = chain([[A.EVENT.REGISTERED, REG], [A.EVENT.ISSUED, { face: 'isometric' }]], A.sealUnchecked);
+  ev.push(A.sealUnchecked(ev, { type: A.EVENT.APPROVED, at: AT, payload: null }));
+  const r = A.verifyPackage(pkgOf(ev));
+  assert.ok(r.checked && !r.rules.pass);
+  assert.ok(r.rules.problems.some((p) => /Issued is reserved/.test(p.message)));
+});
+
+test('envelope rules: seal time and recorded_by are checked when sealing and on replay', () => {
+  const base = chain([[A.EVENT.REGISTERED, REG]]);
+  for (const at of ['', 'yesterday', '2026-02-30T00:00:00Z', '2026-13-01T00:00:00Z', '2026-01-01T24:00:00Z']) {
+    assert.throws(() => A.sealEvent(base, { type: A.EVENT.VALIDATED, at, payload: VAL }), /seal time/, at);
+  }
+  assert.throws(() => A.sealEvent(base, { type: A.EVENT.VALIDATED, at: AT, recordedBy: ' ', payload: VAL }), /recorded_by/);
+  for (const [field, value, re] of [
+    ['sealed_at', undefined, /missing field sealed_at/],
+    ['sealed_at', 'not a time', /sealed_at must be/],
+    ['recorded_by', '', /recorded_by must be/],
+    ['recorded_by', 7, /recorded_by must be/]
+  ]) {
+    const evs = chain([[A.EVENT.REGISTERED, REG]]);
+    const bad = { ...evs[0] };
+    if (value === undefined) delete bad[field]; else bad[field] = value;
+    bad.hash = A.eventHash(bad);
+    const r = A.verifyPackage(pkgOf([bad]));
+    assert.ok(r.rules.problems.some((p) => re.test(p.message)), field + '=' + value);
+  }
+});
+
+test('time rule accepts real dates only', () => {
+  const ok = ['2028-02-29T00:00:00Z', '2026-12-31T23:59:59Z', '2026-07-08T11:00:00.123+05:30', '2026-07-08T11:00Z'];
+  const bad = ['2026-02-29T00:00:00Z', '2026-04-31T00:00:00Z', '2026-02-30T00:00:00Z', '2026-07-08T11:60:00Z', '2026-07-08 11:00:00Z', '2026-07-08T11:00:00+25:00'];
+  const evs = chain([[A.EVENT.REGISTERED, REG], [A.EVENT.VALIDATED, VAL]]);
+  for (const t of ok) assert.strictEqual(A.checkSeal(evs, { type: A.EVENT.APPROVED, at: AT, payload: { ...APPR, approved_at: t } }), null, t);
+  for (const t of bad) assert.match(A.checkSeal(evs, { type: A.EVENT.APPROVED, at: AT, payload: { ...APPR, approved_at: t } }), /ISO 8601/, t);
+});
+
+test('inherited names are not event types, fields or faces', () => {
+  for (const type of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    assert.match(A.validateEvent([], { type, payload: {} }), /Unknown event type/);
+    assert.match(A.canSeal([], type), /Unknown event type/);
+    const r = A.verifyPackage(pkgOf(chain([[A.EVENT.REGISTERED, REG], [type, {}]], A.sealUnchecked)));
+    assert.ok(r.rules.problems.some((p) => /unknown event type/.test(p.message)), type);
+  }
+  const base = chain([[A.EVENT.REGISTERED, REG]]);
+  assert.throws(() => A.sealEvent(base, { type: A.EVENT.CORRECTION, at: AT, payload: { field: 'constructor', value: 'x', reason: 'r' } }), /Corrected field must be one of/);
+  assert.throws(() => A.sealEvent([], { type: A.EVENT.REGISTERED, at: AT, payload: { ...REG, claim: { ...CLAIM, registry_face: 'toString' } } }), /Registry face/);
+});
+
+test('an own "__proto__" member is hashed like any other member', () => {
+  const text = sample('issued').replace('{\n  "format"', '{\n  "__proto__": {"x": 1},\n  "format"');
+  assert.ok(Object.keys(JSON.parse(text)).includes('__proto__'));
+  assert.strictEqual(A.verifyPackage(text).hash.pass, false);
+});
+
+test('Registered.inputs is required (it may be empty), so a Correction always has a previous value', () => {
+  const { inputs, ...noInputs } = REG;
+  assert.throws(() => A.sealEvent([], { type: A.EVENT.REGISTERED, at: AT, payload: noInputs }), /Model inputs is required/);
+  const ev = chain([[A.EVENT.REGISTERED, REG], [A.EVENT.VALIDATED, VAL]]);
+  ev.push(A.sealEvent(ev, { type: A.EVENT.CORRECTION, at: AT, payload: { field: 'inputs', value: 'wind', reason: 'r' } }));
+  ev.push(A.sealEvent(ev, { type: A.EVENT.APPROVED, at: AT, payload: APPR }));
+  ev.push(A.sealEvent(ev, { type: A.EVENT.ISSUED, at: AT, payload: { face: 'puro' } }));
+  const r = A.verifyPackage(JSON.stringify(pkgOf(ev, 'puro')));
+  assert.ok(r.consistent, JSON.stringify(r.consistency.diffs));
+  assert.strictEqual(r.status.derived, 'issued');
+});
+
+test('unpaired surrogates and non-JSON payloads are refused with a reason', () => {
+  assert.throws(() => A.sealEvent([], { type: A.EVENT.REGISTERED, at: AT, payload: { ...REG, version: 'v\uD800' } }), /unpaired surrogate/);
+  assert.strictEqual(A.checkSeal([], { type: A.EVENT.REGISTERED, at: AT, payload: { ...REG, version: '😀' } }), null);
+  const circular = { ...REG }; circular.self = circular;
+  assert.strictEqual(A.checkSeal([], { type: A.EVENT.REGISTERED, at: AT, payload: circular }), 'The payload must be plain JSON data.');
+  assert.strictEqual(A.checkSeal([], { type: A.EVENT.REGISTERED, at: AT, payload: null }), 'The payload must be an object.');
+  assert.strictEqual(A.checkSeal([], { type: A.EVENT.REGISTERED, at: AT, payload: { ...REG, n: 10n } }), 'The payload must be plain JSON data.');
+});
+
+test('sha256Bytes: block boundaries, other realms, shared buffers', () => {
+  const vm = require('vm');
+  for (const n of [0, 1, 55, 56, 63, 64, 65, 119, 120, 127, 128, 129, 4097]) {
+    const b = crypto.randomBytes(n);
+    assert.strictEqual(A.sha256Bytes(b), crypto.createHash('sha256').update(b).digest('hex'), String(n));
+  }
+  const foreign = vm.runInNewContext('new Uint8Array([1,2,3]).buffer');
+  assert.strictEqual(A.sha256Bytes(foreign), crypto.createHash('sha256').update(Buffer.from([1, 2, 3])).digest('hex'));
+  const shared = new SharedArrayBuffer(3);
+  new Uint8Array(shared).set([1, 2, 3]);
+  assert.strictEqual(A.sha256Bytes(shared), A.sha256Bytes(foreign));
+});
+
+test('replaying the rules is linear: 20,000 lines check quickly', () => {
+  const ev = chain([[A.EVENT.REGISTERED, REG]]);
+  for (let i = 0; i < 20000; i++) {
+    const prev = i === 0 ? '1' : 'v' + (i - 1);
+    ev.push(A.sealUnchecked(ev, { type: A.EVENT.CORRECTION, at: AT, payload: { field: 'ai_version', previous: prev, value: 'v' + i, reason: 'r' } }));
+  }
+  const t0 = Date.now();
+  const r = A.checkRules(ev);
+  assert.ok(r.pass, JSON.stringify(r.problems.slice(0, 2)));
+  assert.ok(Date.now() - t0 < 3000, 'took ' + (Date.now() - t0) + ' ms');
 });

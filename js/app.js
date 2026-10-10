@@ -23,6 +23,7 @@
   }
   function shortHash(hex, n) {
     if (!hex) return '';
+    if (typeof hex !== 'string') hex = typeof hex === 'object' ? JSON.stringify(hex) : String(hex);
     n = n || 10;
     return hex.length > n * 2 ? hex.slice(0, n) + '…' + hex.slice(-4) : hex;
   }
@@ -66,7 +67,9 @@
     var tag = pkg.status === 'issued' ? 'issued' : 'DRAFT';
     return 'allocycle-' + recordId + '-' + pkg.face + '-' + tag + '-' + pkg.package_hash.slice(0, 8) + '.json';
   }
-  function faceLabel(face) { return (A.FACES[face] || {}).label || face; }
+  function faceLabel(face) {
+    return typeof face === 'string' && Object.prototype.hasOwnProperty.call(A.FACES, face) ? A.FACES[face].label : String(face);
+  }
   // The approver's name is self-asserted until approver identity is checked.
   function asEntered(name) { return esc(name) + '<br><span class="hint">name as entered, not verified</span>'; }
   // Accepts "sha256:" prefixes and upper case; anything else goes to core
@@ -109,6 +112,7 @@
     var why = A.checkSeal(record.events, full);
     if (why) throw new Error(why);
     if (confirmText && !confirm(confirmText)) throw cancelled();
+    full.at = nowIso(); // the seal time is when the person confirmed, not when the dialog opened
     var ev = A.sealEvent(record.events, full);
     record.events.push(ev);
     saveRecords();
@@ -163,6 +167,7 @@
         '<p class="tagline">Allogenic record. Autogenic log.</p>' +
         '<p class="lede">A checkable log of the AI used on a CDR or CCUS carbon-credit project. allocycle does not score the credit, quantify tons, or submit to a registry.</p>' +
         '<p class="note">This form stands in for the Autogenic connector. In the live product, the connector writes the log when an artifact appears. This prototype keeps the form and does not build connectors.</p>' +
+        '<p class="note note-follow">In the reviewed design, the connector only records what it observes: a version at the bound location and the hash it computed. A named person still turns each observation into a claim. See <a href="#/agents">Live agents</a>.</p>' +
         '<div class="actions">' +
           '<a class="btn" href="#/record/sample-issued">Open the issued sample</a>' +
           '<a class="btn" href="#/record/sample-unapproved">Open the unapproved sample</a>' +
@@ -179,7 +184,7 @@
             '<p>If the named approval is missing, the download is a draft package and that gap is labeled a concern for the evaluator. Issued is reserved for a package that has an “Approved for use” event.</p></article>' +
           '<article class="card"><h3>A changed file fails on its own.</h3>' +
             '<p>At issue, the app hashes the fields (sorted, spacing removed, hash field itself excluded) and writes that hash into the file. Anyone can recompute it. An untouched file passes; a changed field fails.</p>' +
-            '<p class="hint">The prototype does not sign packages yet, so a passing hash shows the file was not changed after it was hashed, not who made it.</p></article>' +
+            '<p class="hint">A changed field fails unless whoever changed it also rewrote the hash. The prototype does not sign packages yet, so a passing hash shows the file was not changed after it was hashed, not who made it.</p></article>' +
         '</div>' +
 
         '<h2 class="section-title">How this works</h2>' +
@@ -656,7 +661,7 @@
       '<section class="page">' +
         '<p class="sim-label">SIMULATED AGENTS · NOT A REAL CREDIT</p>' +
         '<h1>Live agents</h1>' +
-        '<p class="muted">Playback writes steps as they happen, standing in for the Autogenic connector. Each line is hashed onto the line before it (SHA-256 chain). It does not call a real model or issue a package.</p>' +
+        '<p class="muted">Playback writes steps as they happen, standing in for the Autogenic connector, the team’s log and the named person. Each line is hashed onto the line before it (SHA-256 chain). It does not call a real model or issue a package.</p>' +
         '<p class="hint">The connector only records what it <em>observed</em>: a version at the bound location and the hash it computed. Lines marked <em>reported</em> come from the team’s own log. Only a named <em>person</em> turns an observation into a claim.</p>' +
         '<div class="cases" role="tablist">' + CASES.map(function (c) {
           return '<button class="case' + (c.id === current.id ? ' active' : '') + '" role="tab" aria-selected="' + (c.id === current.id) + '" data-case="' + c.id + '">' +
@@ -795,7 +800,7 @@
               '<button class="btn ghost" id="clear-btn">Clear</button>' +
             '</div>' +
             '<details class="recompute"><summary>Recompute it yourself</summary>' +
-              '<p class="hint">Any tool that sorts keys and drops whitespace gives the same hash. For example, with Python:</p>' +
+              '<p class="hint">For allocycle packages, this Python command gives the same hash. It holds for the values allocycle writes (text, booleans, null, small integers); another tool must produce the same canonical form, which for these values is RFC 8785 (JCS).</p>' +
               '<pre>python3 -c "import json,hashlib,sys; d=json.load(open(sys.argv[1])); h=d.pop(\'package_hash\'); ' +
               'c=json.dumps(d,sort_keys=True,separators=(\',\',\':\'),ensure_ascii=False); ' +
               'print(h==hashlib.sha256(c.encode()).hexdigest())" package.json</pre>' +
@@ -837,11 +842,19 @@
 
   function showVerification(text) {
     var out = $('#verify-out');
+    out.innerHTML = '';
     if (!text.trim()) { out.innerHTML = '<div class="card"><p class="fail-text">Paste a package first.</p></div>'; return; }
     var r = A.verifyPackage(text);
     if (!r.ok) { out.innerHTML = '<div class="card verdict fail"><h2>Cannot check</h2><p>' + esc(r.error) + '</p></div>'; return; }
+    try {
+      out.innerHTML = verificationHtml(r);
+    } catch (e) {
+      out.innerHTML = '<div class="card verdict fail"><h2>Cannot display this file</h2><p>' + esc(e.message) + '</p></div>';
+    }
+  }
+
+  function verificationHtml(r) {
     var pkg = r.pkg;
-    var isIssued = pkg.status === 'issued';
     var lineProblems = function (list) {
       return list.map(function (p) { return (p.seq && !/^Line /.test(p.message) ? 'Line ' + p.seq + ': ' : '') + p.message; }).join(' ');
     };
@@ -857,17 +870,37 @@
         '<dt>Canonical form</dt><dd>' + r.canonicalLength.toLocaleString() + ' characters, ' + esc(A.HASH_FIELD) + ' excluded</dd></dl>' +
       '</div>';
 
-    var asOf = r.checked
-      ? ' as of line ' + r.asOf.seq
-      : '';
+    // The status shown is the one the events support, not the one the file
+    // states; the file's own claim is shown only when they differ.
+    var derived = r.checked ? r.status.derived : null;
+    var shown = derived || pkg.status;
+    var label = shown === 'issued' ? 'Issued' : 'Draft package';
+    var scope = !r.checked ? ' (as stated in the file; not checked)'
+      : r.asOf.seq ? ' as of line ' + r.asOf.seq : ' (the file has no lines)';
+    var failed = [];
+    if (!r.hash.pass) failed.push('the hash');
+    if (r.checked) {
+      if (!r.chain.pass) failed.push('the event chain');
+      if (!r.rules.pass) failed.push('the event rules');
+      if (!r.consistency.pass) failed.push('the outline re-derivation');
+    }
+    var concerns = (r.concerns || []).slice();
+    if (r.checked && !r.rules.pass) {
+      concerns.push({ code: 'RULES_NOT_MET', text: r.rules.problems.length + ' problem' + (r.rules.problems.length === 1 ? '' : 's') +
+        ' with the order or fields of the events. See Further checks.' });
+    }
     var status =
-      '<div class="card status-card ' + (isIssued ? '' : 'concern') + '">' +
-        '<h3>Package status: ' + (isIssued ? 'Issued' : 'Draft package') + esc(asOf) + ' · ' + esc(faceLabel(pkg.face)) + ' face</h3>' +
-        (r.hash.pass ? '' : '<p class="fail-text">As stated in the file. The file failed the hash check, so nothing in it can be relied on.</p>') +
+      '<div class="card status-card ' + (shown === 'issued' && r.consistent ? '' : 'concern') + '">' +
+        '<h3>Package status: ' + esc(label + scope) + ' · ' + esc(faceLabel(pkg.face)) + ' face</h3>' +
+        (derived && pkg.status !== derived
+          ? '<p class="fail-text">The file says ' + esc(JSON.stringify(pkg.status)) + '; its events support ' + esc(JSON.stringify(derived)) + '.</p>' : '') +
+        (failed.length
+          ? '<p class="fail-text">Do not rely on this status: ' + esc(failed.join(', ')) + ' failed.</p>' : '') +
         (r.checked
-          ? '<p class="hint">This file shows the record up to line ' + esc(r.asOf.seq) + ' (chain head ' + hashSpan(r.asOf.head, 10) + '). It cannot show anything sealed after that line.</p>' +
-            (r.concerns.length
-              ? '<ul class="concerns">' + r.concerns.map(function (c) { return '<li><strong>' + esc(c.code) + '</strong> ' + esc(c.text) + '</li>'; }).join('') + '</ul>'
+          ? '<p class="hint">This file shows the record up to line ' + esc(r.asOf.seq) + (r.asOf.head ? ' (chain head ' + hashSpan(r.asOf.head, 10) + ')' : '') +
+            '. It cannot show anything sealed after that line.</p>' +
+            (concerns.length
+              ? '<ul class="concerns">' + concerns.map(function (c) { return '<li><strong>' + esc(c.code) + '</strong> ' + esc(c.text) + '</li>'; }).join('') + '</ul>'
               : '<p class="hint">No concerns derived from the events.</p>')
           : '<p class="hint">' + esc(r.reason) + '</p>') +
         (pkg.notice ? '<p class="hint">' + esc(pkg.notice) + ' ' + esc(pkg.scope || '') + '</p>' : '') +
@@ -875,32 +908,34 @@
 
     var items;
     if (r.checked) {
+      var count = Array.isArray(pkg.events) ? pkg.events.length : 0;
       items =
         checkItem(r.chain.pass, 'Event chain', r.chain.pass
-          ? pkg.events.length + ' events; each hash recomputes and links to the line before it.'
+          ? count + ' events; each hash recomputes and links to the line before it.'
           : lineProblems(r.chain.problems)) +
         checkItem(r.rules.pass, 'Events follow the rules', r.rules.pass
-          ? 'Each line was replayed against the order and field rules: known event types only, in a valid order, with valid fields.'
+          ? 'Each line was replayed against the envelope, order and payload rules: known event types only, in a valid order, with valid fields and seal times.'
           : lineProblems(r.rules.problems)) +
         checkItem(r.consistency.pass, 'Outline matches the events', r.consistency.pass
           ? 'Outline, cover sheet, concerns and status all re-derive from the sealed events.'
-          : 'These fields differ from what the sealed events say:');
+          : r.consistency.error || 'These fields differ from what the sealed events say:');
     } else {
       items = checkItem(null, 'Event chain, rules and outline', r.reason);
     }
     items += checkItem(null, 'Origin', r.origin.text);
 
+    var diffs = r.checked && r.consistency.diffs ? r.consistency.diffs : [];
     var checks =
       '<div class="card">' +
         '<h3>Further checks</h3>' +
         '<ul class="checks">' + items + '</ul>' +
-        (r.checked && r.consistency.diffs.length ? '<table class="diffs"><thead><tr><th>Field</th><th>In the file</th><th>From the events</th></tr></thead><tbody>' +
-          r.consistency.diffs.map(function (d) {
+        (diffs.length ? '<table class="diffs"><thead><tr><th>Field</th><th>In the file</th><th>From the events</th></tr></thead><tbody>' +
+          diffs.map(function (d) {
             return '<tr><td><code>' + esc(d.path) + '</code></td><td class="fail-text">' + esc(d.stated) + '</td><td>' + esc(d.derived) + '</td></tr>';
           }).join('') + '</tbody></table>' : '') +
       '</div>';
 
-    out.innerHTML = verdict + status + checks + outlineView(pkg);
+    return verdict + status + checks + outlineView(pkg, r.consistent);
   }
 
   // pass: true, false, or null for "not checked".
@@ -910,46 +945,51 @@
     return '<li class="' + cls + '"><span class="mark">' + mark + '</span><div><strong>' + esc(title) + '</strong><p>' + esc(text) + '</p></div></li>';
   }
 
-  function outlineView(pkg) {
-    var o = pkg.outline || {};
-    var cs = pkg.cover_sheet || {};
+  // Shows the outline as written in the file; every value is escaped and
+  // odd shapes are tolerated, because the file may be hostile.
+  function outlineView(pkg, consistent) {
+    var obj = function (v) { return v !== null && typeof v === 'object' && !Array.isArray(v) ? v : null; };
+    var o = obj(pkg.outline) || {};
+    var cs = obj(pkg.cover_sheet) || {};
     var none = '<p class="hint">None on record.</p>';
     var section = function (title, body, concern) {
       return '<section class="ol-section' + (concern ? ' concern' : '') + '"><h4>' + esc(title) + '</h4>' + body + '</section>';
     };
-    var src = o.source ? kv([['AI system', o.source.ai_system], ['Version', o.source.version], ['Artifact hash', hashSpan(o.source.artifact_hash, 16), true]]) : none;
-    var mods = o.modifications && o.modifications.length
-      ? '<ul class="mods">' + o.modifications.map(function (m) {
-          var spec = A.CORRECTABLE[m.field] || { label: m.field };
+    var source = obj(o.source), inp = obj(o.inputs), dat = obj(o.data), vali = obj(o.validation), na = obj(o.named_approval), bb = obj(o.batch_binding);
+    var src = source ? kv([['AI system', source.ai_system], ['Version', source.version], ['Artifact hash', hashSpan(source.artifact_hash, 16), true]]) : none;
+    var modList = Array.isArray(o.modifications) ? o.modifications.filter(obj) : [];
+    var mods = modList.length
+      ? '<ul class="mods">' + modList.map(function (m) {
+          var spec = typeof m.field === 'string' && Object.prototype.hasOwnProperty.call(A.CORRECTABLE, m.field) ? A.CORRECTABLE[m.field] : { label: String(m.field) };
           var fmt = function (v) { return spec.isHash ? hashSpan(v, 10) : esc(v); };
           return '<li><strong>Line ' + esc(m.seq) + '</strong> · ' + esc(spec.label) + ': ' + fmt(m.previous) + ' → ' + fmt(m.value) +
             '<br><span class="muted">' + esc(m.reason) + (m.autogenic_reference ? ' (' + esc(m.autogenic_reference) + ')' : '') + '</span></li>';
         }).join('') + '</ul>'
       : '<p class="hint">No corrections.</p>';
-    var inputs = o.inputs ? kv([['Model inputs', o.inputs.description]]) : none;
-    var data = o.data ? kv([['Snapshot hash', hashSpan(o.data.snapshot_hash, 16), true]]) : none;
-    var val = o.validation ? kv([['Type', o.validation.type], ['Result', o.validation.summary], ['Reference', o.validation.reference]]) : none;
-    var appr = o.named_approval
-      ? kv([['Person', asEntered(o.named_approval.person), true], ['Role', o.named_approval.role], ['Time', fmtTime(o.named_approval.approved_at)], ['Intended use', o.named_approval.intended_use]])
+    var inputs = inp ? kv([['Model inputs', inp.description]]) : none;
+    var data = dat ? kv([['Snapshot hash', hashSpan(dat.snapshot_hash, 16), true]]) : none;
+    var val = vali ? kv([['Type', vali.type], ['Result', vali.summary], ['Reference', vali.reference]]) : none;
+    var appr = na
+      ? kv([['Person', asEntered(na.person), true], ['Role', na.role], ['Time', fmtTime(na.approved_at)], ['Intended use', na.intended_use]])
       : '<p class="concern-text">Missing. No current “Approved for use” event. This is a concern for the evaluator.</p>';
-    var bind = o.batch_binding
-      ? kv([['Project', o.batch_binding.project_name], ['Project / facility id', o.batch_binding.project_id], ['Protocol', o.batch_binding.protocol],
-          ['Batch / period', o.batch_binding.batch], ['Bound at', 'line ' + o.batch_binding.bound_at_seq], ['Registered line hash', hashSpan(o.batch_binding.registered_event_hash, 10), true]])
+    var bind = bb
+      ? kv([['Project', bb.project_name], ['Project / facility id', bb.project_id], ['Protocol', bb.protocol],
+          ['Batch / period', bb.batch], ['Bound at', 'line ' + bb.bound_at_seq], ['Registered line hash', hashSpan(bb.registered_event_hash, 10), true]])
       : none;
     var cover = kv(Object.keys(cs).filter(function (k) { return k !== 'face'; }).map(function (k) {
-      var v = cs[k]; return [k.replace(/_/g, ' '), Array.isArray(v) ? v.join(', ') : String(v)];
+      var v = cs[k]; return [k.replace(/_/g, ' '), Array.isArray(v) ? v.join(', ') : typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)];
     }));
     return '<div class="card outline">' +
-      '<h3>Outline</h3>' +
+      '<h3>Outline' + (consistent ? '' : ' <span class="muted small">(as written in the file; it did not pass every check)</span>') + '</h3>' +
       '<div class="ol-grid">' +
         section('Source', src) +
         section('Modifications', mods) +
         section('Inputs', inputs) +
         section('Data', data) +
         section('Validation', val) +
-        section('Named approval', appr, !o.named_approval) +
+        section('Named approval', appr, !na) +
         section('Batch binding', bind) +
-        section('Cover sheet · ' + (cs.face || '—'), cover) +
+        section('Cover sheet · ' + (typeof cs.face === 'string' ? cs.face : '—'), cover) +
       '</div></div>';
   }
 

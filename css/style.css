@@ -345,3 +345,4 @@ output.current { display: block; font-family: var(--mono); font-size: 0.82rem; w
 .term-sealed .t-kind { color: #9fd8bd; }
 .term-correction { background: rgba(232, 180, 92, 0.12); }
 .term-correction .t-kind, .term-correction .t-text { color: #f1d199; }
+.note.note-follow { margin-top: 8px; border-left-color: var(--accent); }
