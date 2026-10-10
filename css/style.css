@@ -351,3 +351,6 @@ output.current { display: block; font-family: var(--mono); font-size: 0.82rem; w
 .term-correction { background: rgba(235, 178, 95, 0.12); }
 .term-correction .t-kind, .term-correction .t-text { color: #ebb25f; }
 .note.note-follow { margin-top: 8px; border-left-color: var(--accent); }
+.banner.notice { background: var(--concern-soft); border-left: 3px solid var(--concern); }
+.storage-note { margin-bottom: 16px; }
+.storage-note .form-actions { margin-top: 8px; }

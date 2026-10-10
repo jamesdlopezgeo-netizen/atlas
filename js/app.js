@@ -63,6 +63,9 @@
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
   }
+  function storedPackage(pkg) {
+    return { face: pkg.face, status: pkg.status, package_hash: pkg.package_hash, generated_at: pkg.generated_at, json: pkg };
+  }
   function packageFilename(recordId, pkg) {
     var tag = pkg.status === 'issued' ? 'issued' : 'DRAFT';
     return 'allocycle-' + recordId + '-' + pkg.face + '-' + tag + '-' + pkg.package_hash.slice(0, 8) + '.json';
@@ -80,19 +83,53 @@
   /* Storage (browser only; sample records are read-only and in memory)  */
   /* ------------------------------------------------------------------ */
 
-  var memoryStore = null;
-  function loadRecords() {
-    if (memoryStore) return memoryStore;
+  // Records live in this browser's localStorage under one key. There is no
+  // cache: every read goes to storage, and every write reads the list again,
+  // replaces one record and checks that nobody (another tab) moved that
+  // record on in the meantime. A write that fails throws; nothing is ever
+  // shown as saved when it was not.
+  var memoryOnly = null;   // records kept in memory when localStorage is blocked
+  var unreadable = null;   // the stored text, when it cannot be parsed
+
+  function storage() {
     try {
-      var raw = window.localStorage.getItem(STORE_KEY);
-      memoryStore = raw ? JSON.parse(raw) : [];
+      var ls = window.localStorage;
+      ls.getItem(STORE_KEY);
+      return ls;
     } catch (e) {
-      memoryStore = [];
+      return null;
     }
-    return memoryStore;
   }
-  function saveRecords() {
-    try { window.localStorage.setItem(STORE_KEY, JSON.stringify(memoryStore)); } catch (e) { /* in-memory only */ }
+  function readAll() {
+    var ls = storage();
+    if (!ls) return memoryOnly || (memoryOnly = []);
+    var raw = ls.getItem(STORE_KEY);
+    unreadable = null;
+    if (!raw) return [];
+    try {
+      var list = JSON.parse(raw);
+      if (Array.isArray(list)) return list;
+    } catch (e) { /* handled below */ }
+    unreadable = raw;
+    return [];
+  }
+  function writeAll(list) {
+    var ls = storage();
+    if (!ls) { memoryOnly = list; return; }
+    if (unreadable !== null) {
+      throw new Error('Not saved. The records stored in this browser could not be read, and saving now would overwrite them. See the note on the Records page.');
+    }
+    try {
+      ls.setItem(STORE_KEY, JSON.stringify(list));
+    } catch (e) {
+      throw new Error('Not saved. This browser refused to store the record (its storage may be full or blocked). Nothing was changed.');
+    }
+  }
+  function isRecord(r) {
+    return r !== null && typeof r === 'object' && typeof r.id === 'string' && Array.isArray(r.events);
+  }
+  function loadRecords() {
+    return readAll().filter(isRecord);
   }
   function getRecord(id) {
     var s = SAMPLES.records.filter(function (r) { return r.id === id; })[0];
@@ -102,21 +139,62 @@
   function newRecordId() {
     return 'rec-' + randomHex().slice(0, 8);
   }
+  function headOf(events) {
+    var n = Array.isArray(events) ? events.length : 0;
+    var last = n ? events[n - 1] : null;
+    return { n: n, head: last && typeof last === 'object' ? last.hash : null };
+  }
+  function sameHead(a, b) {
+    return a.n === b.n && a.head === b.head;
+  }
+  function staleError() {
+    var e = new Error('Not saved. This record changed in another tab or window, so the page now shows the latest version. Nothing was sealed.');
+    e.stale = true;
+    return e;
+  }
+  // Writes one record. `seen` is the head of the events the caller started
+  // from, or null for a record that must not exist yet.
+  function saveRecord(rec, seen) {
+    var list = readAll();
+    var i = -1;
+    list.forEach(function (r, j) { if (isRecord(r) && r.id === rec.id) i = j; });
+    if (seen === null ? i !== -1 : i === -1 || !sameHead(headOf(list[i].events), seen)) throw staleError();
+    var next = list.slice();
+    if (i === -1) next.push(rec); else next[i] = rec;
+    writeAll(next);
+  }
+  function removeRecord(id, seen) {
+    var list = readAll();
+    var i = -1;
+    list.forEach(function (r, j) { if (isRecord(r) && r.id === id) i = j; });
+    if (i === -1 || !sameHead(headOf(list[i].events), seen)) throw staleError();
+    writeAll(list.slice(0, i).concat(list.slice(i + 1)));
+  }
+  function copyOf(record) {
+    var c = JSON.parse(JSON.stringify(record));
+    c.packages = Array.isArray(c.packages) ? c.packages : [];
+    return c;
+  }
 
   // The only write path for events: seal, then append. No edit, no delete.
   // All rules (order and payload) live in core's sealEvent; the form only
   // tidies input. Rules are checked before the person is asked to confirm.
-  function appendEvent(record, spec, confirmText) {
+  // `also` may add to the new copy of the record (e.g. the issued package),
+  // so the event and what goes with it are saved in one write.
+  function appendEvent(record, spec, confirmText, also) {
     if (record.sample) throw new Error('Sample records are read-only.');
+    var seen = headOf(record.events);
     var full = { type: spec.type, at: nowIso(), payload: spec.payload };
     var why = A.checkSeal(record.events, full);
     if (why) throw new Error(why);
     if (confirmText && !confirm(confirmText)) throw cancelled();
     full.at = nowIso(); // the seal time is when the person confirmed, not when the dialog opened
     var ev = A.sealEvent(record.events, full);
-    record.events.push(ev);
-    saveRecords();
-    return ev;
+    var next = copyOf(record);
+    next.events.push(ev);
+    if (also) also(next, ev);
+    saveRecord(next, seen);
+    return next;
   }
   function cancelled() {
     var e = new Error('Cancelled.');
@@ -124,12 +202,52 @@
     return e;
   }
 
+  // A note shown on the record pages when storage is not doing its job.
+  function storageNote() {
+    if (unreadable !== null) {
+      return '<div class="concern-box storage-note"><strong>The records stored in this browser could not be read.</strong> ' +
+        'Nothing new can be saved until this is resolved, so that the stored text is not overwritten. ' +
+        '<div class="form-actions"><button class="btn small" type="button" id="store-export">Download the stored text</button>' +
+        '<button class="btn small ghost danger" type="button" id="store-reset">Clear it and start fresh</button></div></div>';
+    }
+    if (memoryOnly) {
+      return '<div class="concern-box storage-note"><strong>This browser is not saving records.</strong> ' +
+        'Local storage is blocked, so records you start here are kept only until this tab closes.</div>';
+    }
+    var hidden = readAll().length - loadRecords().length;
+    if (hidden > 0) {
+      return '<div class="concern-box storage-note">' + hidden + ' stored entr' + (hidden === 1 ? 'y is' : 'ies are') +
+        ' not a readable record and ' + (hidden === 1 ? 'is' : 'are') + ' hidden. They stay in storage unchanged.</div>';
+    }
+    return '';
+  }
+  function bindStorageNote() {
+    var exp = $('#store-export');
+    if (exp) exp.addEventListener('click', function () {
+      var blob = new Blob([unreadable || ''], { type: 'text/plain' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = 'allocycle-stored-records.txt';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    });
+    var reset = $('#store-reset');
+    if (reset) reset.addEventListener('click', function () {
+      if (!confirm('Clear the unreadable stored text? Download it first if you may need it. This cannot be undone.')) return;
+      try { window.localStorage.removeItem(STORE_KEY); } catch (e) { /* nothing to clear */ }
+      unreadable = null;
+      route();
+    });
+  }
+
   /* ------------------------------------------------------------------ */
   /* Router                                                              */
   /* ------------------------------------------------------------------ */
 
   var cleanup = null;
+  var view = { recordId: null, head: null };
   function route() {
+    view = { recordId: null, head: null };
     if (cleanup) { cleanup(); cleanup = null; }
     var hash = location.hash.replace(/^#/, '') || '/';
     var parts = hash.split('/').filter(Boolean);
@@ -150,6 +268,30 @@
     window.scrollTo(0, 0);
   }
   window.addEventListener('hashchange', route);
+
+  // Another tab wrote to storage: refresh what this tab shows, so it never
+  // acts on a stale copy.
+  window.addEventListener('storage', function (e) {
+    if (e.key !== STORE_KEY && e.key !== null) return;
+    if (/^#\/records\/?$/.test(location.hash)) { route(); return; }
+    if (!view.recordId) return;
+    var r = getRecord(view.recordId);
+    if (!r || !sameHead(headOf(r.events), view.head)) {
+      route();
+      notice('This record changed in another tab. The page now shows the latest version.');
+    }
+  });
+
+  // A short message at the top of the current page.
+  function notice(text) {
+    var page = $('.page');
+    if (!page) return;
+    var el = document.createElement('div');
+    el.className = 'banner notice';
+    el.setAttribute('role', 'status');
+    el.textContent = text;
+    page.insertBefore(el, page.firstChild);
+  }
 
   function renderNotFound() {
     app.innerHTML = '<section class="page narrow"><h1>Not found</h1><p><a href="#/">Back to home</a></p></section>';
@@ -234,6 +376,7 @@
     var mine = loadRecords();
     app.innerHTML =
       '<section class="page">' +
+        storageNote() +
         '<div class="page-head"><div><p class="eyebrow">EXTERNAL RECORD</p><h1>Records</h1>' +
         '<p class="muted">One record per claim: one batch, one AI system.</p></div>' +
         '<a class="btn primary" href="#/new">Start a record</a></div>' +
@@ -244,6 +387,7 @@
           ? '<div class="rows">' + mine.slice().reverse().map(recordRow).join('') + '</div>'
           : '<p class="empty">No records yet. <a href="#/new">Start a record</a>.</p>') +
       '</section>';
+    bindStorageNote();
   }
 
   function claimFields(claim, disabled) {
@@ -271,6 +415,7 @@
   function renderNew() {
     app.innerHTML =
       '<section class="page narrow">' +
+        storageNote() +
         '<p class="eyebrow">STEP 1 · ONE CLAIM, ONE SYSTEM</p>' +
         '<h1>Start a record</h1>' +
         '<p class="muted">Open a record for one batch. These fields are fixed into the record when you seal the Registered event.</p>' +
@@ -279,12 +424,17 @@
           '<a class="btn ghost" href="#/records">Cancel</a></div>' +
         '</form>' +
       '</section>';
+    bindStorageNote();
     $('#new-form').addEventListener('submit', function (e) {
       e.preventDefault();
       var claim = formData(e.target);
       var rec = { id: newRecordId(), created_at: nowIso(), claim: claim, events: [], packages: [] };
-      loadRecords().push(rec);
-      saveRecords();
+      try {
+        saveRecord(rec, null);
+      } catch (err) {
+        alert(err.message);
+        return;
+      }
       location.hash = '#/record/' + rec.id;
     });
   }
@@ -300,6 +450,7 @@
       return;
     }
     var ro = !!record.sample;
+    view = { recordId: record.id, head: headOf(record.events) };
     var s = A.deriveState(record.events);
     var chain = A.checkChain(record.events);
     var claim = s.claim || record.claim || {};
@@ -308,7 +459,7 @@
 
     app.innerHTML =
       '<section class="page wide">' +
-        (ro ? '<div class="banner">Sample record · read-only. <a href="#/new">Start your own record</a> to seal events.</div>' : '') +
+        (ro ? '<div class="banner">Sample record · read-only. <a href="#/new">Start your own record</a> to seal events.</div>' : storageNote()) +
         '<div class="page-head">' +
           '<div><p class="eyebrow">ALLOGENIC RECORD · ' + esc(record.id) + '</p>' +
           '<h1>' + esc(claim.project_name || 'Untitled record') + '</h1>' +
@@ -531,9 +682,17 @@
     var guard = function (fn) {
       return function (e) {
         e.preventDefault();
-        try { fn(e); rerender(); } catch (err) { if (!err.cancelled) alert(err.message); }
+        try {
+          fn(e);
+          rerender();
+        } catch (err) {
+          if (err.cancelled) return;
+          if (err.stale) { rerender(); notice(err.message); return; }
+          alert(err.message);
+        }
       };
     };
+    bindStorageNote();
 
     $$('[data-fill]').forEach(function (b) {
       b.addEventListener('click', function () { $('input[name="' + b.getAttribute('data-fill') + '"]', b.closest('form')).value = randomHex(); });
@@ -542,17 +701,17 @@
     var claimForm = $('#claim-form');
     if (claimForm && !record.sample) {
       claimForm.addEventListener('submit', guard(function () {
-        record.claim = formData(claimForm);
-        saveRecords();
+        var next = copyOf(record);
+        next.claim = formData(claimForm);
+        saveRecord(next, headOf(record.events));
       }));
       var discard = $('#discard');
-      if (discard) discard.addEventListener('click', function () {
+      if (discard) discard.addEventListener('click', guard(function () {
         if (record.events.length) return;
-        if (!confirm('Discard this record? It has no sealed events.')) return;
-        memoryStore = loadRecords().filter(function (r) { return r.id !== record.id; });
-        saveRecords();
+        if (!confirm('Discard this record? It has no sealed events.')) throw cancelled();
+        removeRecord(record.id, headOf(record.events));
         location.hash = '#/records';
-      });
+      }));
     }
 
     var reg = $('#register-form');
@@ -561,9 +720,8 @@
       var d = formData(reg);
       appendEvent(record, { type: E.REGISTERED, payload: {
         claim: claimData, ai_system: d.ai_system, version: d.version, artifact_hash: tidyHash(d.artifact_hash), inputs: d.inputs || ''
-      } }, 'Seal the Registered event? A sealed event cannot be edited or deleted. The claim fields are fixed with it.');
-      record.claim = claimData;
-      saveRecords();
+      } }, 'Seal the Registered event? A sealed event cannot be edited or deleted. The claim fields are fixed with it.',
+      function (next) { next.claim = claimData; });
     }));
 
     var val = $('#validate-form');
@@ -616,11 +774,12 @@
     $$('[data-issue]').forEach(function (b) {
       b.addEventListener('click', guard(function () {
         var face = b.getAttribute('data-issue');
-        appendEvent(record, { type: E.ISSUED, payload: { face: face } }, 'Issue the ' + faceLabel(face) + ' package? This seals a Package issued event.');
-        var pkg = A.buildPackage({ recordId: record.id, events: record.events, face: face, generatedAt: nowIso() });
-        record.packages = record.packages || [];
-        record.packages.push({ face: face, status: pkg.status, package_hash: pkg.package_hash, generated_at: pkg.generated_at, json: pkg });
-        saveRecords();
+        var pkg = null;
+        appendEvent(record, { type: E.ISSUED, payload: { face: face } }, 'Issue the ' + faceLabel(face) + ' package? This seals a Package issued event.',
+          function (next) {
+            pkg = A.buildPackage({ recordId: next.id, events: next.events, face: face, generatedAt: nowIso() });
+            next.packages.push(storedPackage(pkg));
+          });
         download(packageFilename(record.id, pkg), pkg);
       }));
     });
@@ -629,10 +788,13 @@
       b.addEventListener('click', guard(function () {
         var face = b.getAttribute('data-draft');
         var pkg = A.buildPackage({ recordId: record.id, events: record.events, face: face, generatedAt: nowIso() });
-        record.packages = record.packages || [];
-        record.packages.push({ face: face, status: pkg.status, package_hash: pkg.package_hash, generated_at: pkg.generated_at, json: pkg });
-        saveRecords();
         download(packageFilename(record.id, pkg), pkg);
+        // Keep one draft copy per face (drafts can always be rebuilt), so
+        // repeated downloads do not fill the browser's storage.
+        var next = copyOf(record);
+        next.packages = next.packages.filter(function (p) { return !(p.face === face && p.status !== 'issued'); });
+        next.packages.push(storedPackage(pkg));
+        saveRecord(next, headOf(record.events));
       }));
     });
 
