@@ -343,7 +343,7 @@
         '<p class="tagline">Allogenic record. Autogenic log.</p>' +
         '<p class="lede">A checkable log of the AI used on a CDR or CCUS carbon-credit project. allocycle does not score the credit, quantify tons, or submit to a registry.</p>' +
         '<p class="note">This form stands in for the Autogenic connector. In the live product, the connector writes the log when an artifact appears. This prototype keeps the form and does not build connectors.</p>' +
-        '<p class="note note-follow">In the reviewed design, the connector only records what it observes: a version at the bound location and the hash it computed. A named person still turns each observation into a claim. See <a href="#/agents">Live agents</a>.</p>' +
+        '<p class="note note-follow">What the connector writes, in the reviewed design, is an observation: a version at the bound location and the hash it computed. A named person still turns each observation into a claim (see <a href="#/agents">Live agents</a>). In this prototype you enter everything by hand: <a href="#/new">Start a record</a>.</p>' +
         '<div class="actions">' +
           '<a class="btn" href="#/record/sample-issued">Open the issued sample</a>' +
           '<a class="btn" href="#/record/sample-unapproved">Open the unapproved sample</a>' +
@@ -610,7 +610,7 @@
       var p = s.validated.payload;
       return stepCard(3, 'Validate', 'sealed', kv([
         ['Data snapshot hash', fullHash(p.data_snapshot_hash), true], ['Validation type', p.validation_type],
-        ['Result', p.summary], ['Reference', p.reference]
+        ['Validation summary', p.summary], ['Reference', p.reference]
       ]) + correctedNote(s, ['data_snapshot_hash', 'validation_type', 'validation_summary']), s.validated);
     }
     var blocked = A.canSeal(record.events, E.VALIDATED);
@@ -618,12 +618,12 @@
     return stepCard(3, 'Validate', 'ready',
       '<form class="form" id="validate-form">' +
         hashField('data_snapshot_hash', 'Data snapshot hash', '', '', 'SHA-256 of the data snapshot the system was validated on.') +
-        '<fieldset class="field"><legend>Validation result</legend><div class="radios">' +
+        '<fieldset class="field"><legend>Validation type</legend><div class="radios">' +
           A.VALIDATION_TYPES.map(function (t, i) {
             return '<label class="radio"><input type="radio" name="validation_type" value="' + t + '"' + (i === 0 ? ' checked' : '') + '> ' + esc(t) + '</label>';
           }).join('') +
         '</div></fieldset>' +
-        '<label class="field"><span>Result summary</span><textarea name="summary" rows="2" required placeholder="e.g. Compared with 14 held-out runs; all within the stated envelope"></textarea></label>' +
+        '<label class="field"><span>Validation summary</span><textarea name="summary" rows="2" required placeholder="e.g. Compared with 14 held-out runs; all within the stated envelope"></textarea></label>' +
         field('reference', 'Reference', '', 'Memo, paper, or report id', '', false) +
         '<div class="form-actions"><button class="btn primary" type="submit">Seal Validated event</button></div>' +
       '</form>');
@@ -1383,7 +1383,7 @@
       : '<p class="hint">No corrections.</p>';
     var inputs = inp ? kv([['Model inputs', inp.description]]) : none;
     var data = dat ? kv([['Snapshot hash', fullHash(dat.snapshot_hash), true]]) : none;
-    var val = vali ? kv([['Type', vali.type], ['Result', vali.summary], ['Reference', vali.reference]]) : none;
+    var val = vali ? kv([['Validation type', vali.type], ['Validation summary', vali.summary], ['Reference', vali.reference]]) : none;
     var appr = na
       ? kv([['Person', asEntered(na.person), true], ['Role', na.role], ['Time', fmtTime(na.approved_at)], ['Intended use', na.intended_use]])
       : '<p class="concern-text">Missing. No current “Approved for use” event. This is a concern for the evaluator.</p>';
