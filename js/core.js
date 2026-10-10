@@ -680,10 +680,17 @@
     return issuedForFace ? 'issued' : 'draft';
   }
 
-  function statusNote(status) {
-    return status === 'issued'
-      ? 'Issued package. The record carries an "Approved for use" event by a named person, sealed before this package was issued.'
-      : 'Draft package. The named approval is missing or out of date; see concerns. A draft package is not an issued package.';
+  // Says why a package has the status it has. The one draft case with no
+  // concern (approved, but not issued for this face) gets its own reason.
+  function statusNote(status, state) {
+    if (status === 'issued') {
+      return 'Issued package. The record carries an "Approved for use" event by a named person, sealed before this package was issued.';
+    }
+    if (state && state.approval) {
+      return 'Draft package. The record has a current "Approved for use" event (line ' + state.approval.seq +
+        '), but no Package issued event for this face was sealed after it. A draft package is not an issued package.';
+    }
+    return 'Draft package. The named approval is missing or out of date; see concerns. A draft package is not an issued package.';
   }
 
   function buildPackage(opts) {
@@ -699,7 +706,7 @@
       record_id: opts.recordId,
       face: face,
       status: status,
-      status_note: statusNote(status),
+      status_note: statusNote(status, state),
       cover_sheet: coverSheet(state.claim, face),
       outline: deriveOutline(events),
       concerns: deriveConcerns(state),
@@ -759,7 +766,16 @@
     return { pkg: pkg };
   }
 
+  // Never throws: a file that breaks the checker is reported as an error.
   function verifyPackage(input) {
+    try {
+      return verifyPackageUnsafe(input);
+    } catch (e) {
+      return { ok: false, error: 'Could not check this file: ' + (e && e.message ? e.message : String(e)) };
+    }
+  }
+
+  function verifyPackageUnsafe(input) {
     var parsed = parsePackage(input);
     if (parsed.error) return { ok: false, error: parsed.error };
     var pkg = parsed.pkg;
@@ -767,7 +783,8 @@
       return { ok: false, error: 'No "' + HASH_FIELD + '" field. This does not look like an allocycle package.' };
     }
 
-    var stated = pkg[HASH_FIELD].trim().toLowerCase().replace(/^sha256:/, '');
+    // Compared exactly as written, as the published Python check does.
+    var stated = pkg[HASH_FIELD];
     var recomputed;
     try {
       recomputed = packageHash(pkg);
@@ -812,13 +829,22 @@
     try {
       var state = deriveState(events);
       var face = pkg.face;
-      derivedStatus = hasOwn(FACES, face) ? deriveStatus(events, face) : 'draft';
+      var knownFace = hasOwn(FACES, face);
+      derivedStatus = knownFace ? deriveStatus(events, face) : 'draft';
       concerns = deriveConcerns(state);
+      // Everything in a v1 package is either fixed text or derived from the
+      // events, except record_id and generated_at. Fixed text is compared
+      // too, so a file cannot carry a different notice or scope.
       var diffs = []
+        .concat(knownFace ? [] : [{ path: 'face', stated: describe(face), derived: 'one of ' + FACE_ORDER.join(', ') }])
         .concat(diff(pkg.outline, deriveOutline(events), 'outline'))
         .concat(diff(pkg.cover_sheet, coverSheet(state.claim, face), 'cover_sheet'))
         .concat(diff(pkg.concerns, concerns, 'concerns'))
-        .concat(diff(pkg.status, derivedStatus, 'status'));
+        .concat(diff(pkg.status, derivedStatus, 'status'))
+        .concat(diff(pkg.status_note, statusNote(derivedStatus, state), 'status_note'))
+        .concat(diff(pkg.notice, NOTICE, 'notice'))
+        .concat(diff(pkg.scope, SCOPE, 'scope'))
+        .concat(diff(pkg.hash_rule, HASH_RULE, 'hash_rule'));
       consistency = { pass: diffs.length === 0, diffs: diffs };
     } catch (e) {
       consistency = { pass: false, diffs: [], error: 'Could not re-derive the package from its events: ' + e.message };

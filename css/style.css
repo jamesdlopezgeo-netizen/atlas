@@ -358,3 +358,7 @@ output.current { display: block; font-family: var(--mono); font-size: 0.82rem; w
 .concern-box.damaged { background: var(--fail-soft); border-left-color: var(--fail); }
 .full-hashes { margin: 6px 0; font-size: 0.78rem; }
 .chain-head .hash.full { font-size: 0.72rem; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.verdict.na { border-color: var(--rule-strong); background: var(--code-bg); }
+.verdict.na .verdict-label { color: var(--muted); }
+.checks .diffs { margin-top: 8px; }

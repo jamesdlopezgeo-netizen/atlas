@@ -48,6 +48,16 @@
     (window.crypto || {}).getRandomValues ? window.crypto.getRandomValues(b) : b.forEach(function (_, i) { b[i] = Math.random() * 256; });
     return Array.prototype.map.call(b, function (x) { return ('0' + x.toString(16)).slice(-2); }).join('');
   }
+  function reducedMotion() {
+    return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+  // Polite message for screen readers (see #announcer in index.html).
+  function announce(text) {
+    var el = document.getElementById('announcer');
+    if (!el) return;
+    el.textContent = '';
+    setTimeout(function () { el.textContent = text; }, 30);
+  }
   function $(sel, root) { return (root || app).querySelector(sel); }
   function $$(sel, root) { return Array.prototype.slice.call((root || app).querySelectorAll(sel)); }
   function formData(form) {
@@ -261,7 +271,7 @@
     if (!parts.length) renderHome();
     else if (parts[0] === 'records') renderRecords();
     else if (parts[0] === 'new') renderNew();
-    else if (parts[0] === 'record' && parts[1]) renderRecord(decodeURIComponent(parts[1]));
+    else if (parts[0] === 'record' && parts[1]) renderRecord(decodeId(parts[1]));
     else if (parts[0] === 'agents') renderAgents(parts[1]);
     else if (parts[0] === 'verify') renderVerify(parts[1]);
     else renderNotFound();
@@ -291,6 +301,10 @@
     el.setAttribute('role', 'status');
     el.textContent = text;
     page.insertBefore(el, page.firstChild);
+  }
+
+  function decodeId(raw) {
+    try { return decodeURIComponent(raw); } catch (e) { return null; }
   }
 
   function renderNotFound() {
@@ -454,7 +468,7 @@
   /* ------------------------------------------------------------------ */
 
   function renderRecord(id) {
-    var record = getRecord(id);
+    var record = id === null ? null : getRecord(id);
     if (!record) {
       app.innerHTML = '<section class="page narrow"><h1>No such record</h1><p>Records you start live in this browser only. <a href="#/records">See records</a>.</p></section>';
       return;
@@ -980,12 +994,20 @@
   /* Verify                                                              */
   /* ------------------------------------------------------------------ */
 
+  var MAX_ROWS = 100;
+  function ownSample(name) {
+    return typeof name === 'string' && Object.prototype.hasOwnProperty.call(SAMPLES.packages, name) ? SAMPLES.packages[name] : null;
+  }
+  function joinList(items) {
+    return items.length < 2 ? items.join('') : items.slice(0, -1).join(', ') + ' and ' + items[items.length - 1];
+  }
+
   function renderVerify(preset) {
     app.innerHTML =
       '<section class="page wide">' +
         '<p class="eyebrow">NO ACCOUNT REQUIRED</p>' +
         '<h1>Verify a package</h1>' +
-        '<p class="muted">Paste package JSON or upload a file. The hash is recomputed the same way it was issued: canonical JSON, keys sorted, whitespace removed, the <code>package_hash</code> field excluded, then SHA-256. An untouched file passes; a changed field fails, unless whoever changed it also rewrote the hash. Packages are not signed yet, so this page checks that a file is internally consistent, not who made it.</p>' +
+        '<p class="muted">Paste package JSON or upload a file. The hash is recomputed the same way it was written: canonical JSON, keys sorted, whitespace removed, the <code>package_hash</code> field excluded, then SHA-256. An untouched file passes; a changed field fails, unless whoever changed it also rewrote the hash. Packages are not signed yet, so this page checks that a file is internally consistent, not who made it.</p>' +
         '<div class="verify-grid">' +
           '<div class="card">' +
             '<div class="sample-buttons">' +
@@ -994,63 +1016,97 @@
               '<button class="btn ghost" data-sample="unapproved">Check draft sample</button>' +
             '</div>' +
             '<label class="field"><span>Package JSON</span>' +
-              '<textarea id="pkg-input" rows="16" spellcheck="false" placeholder="Paste an allocycle package here, or drop a .json file"></textarea></label>' +
+              '<textarea id="pkg-input" rows="16" spellcheck="false" placeholder="Paste an allocycle package here, or drop a .json file anywhere on this page"></textarea></label>' +
             '<div class="form-actions">' +
               '<button class="btn primary" id="verify-btn">Recompute hash</button>' +
               '<label class="btn ghost file-btn">Upload file<input type="file" id="pkg-file" accept=".json,application/json"></label>' +
               '<button class="btn ghost" id="clear-btn">Clear</button>' +
             '</div>' +
             '<details class="recompute"><summary>Recompute it yourself</summary>' +
-              '<p class="hint">For allocycle packages, this Python command gives the same hash. It holds for the values allocycle writes (text, booleans, null, small integers); another tool must produce the same canonical form, which for these values is RFC 8785 (JCS).</p>' +
+              '<p class="hint">This Python command recomputes the hash and prints True when it matches the hash in the file. It gives the same result as this page for the values allocycle writes (text, booleans, null, small integers). Another tool must produce the same canonical form, which for these values is RFC 8785 (JCS).</p>' +
               '<pre>python3 -c "import json,hashlib,sys; d=json.load(open(sys.argv[1])); h=d.pop(\'package_hash\'); ' +
               'c=json.dumps(d,sort_keys=True,separators=(\',\',\':\'),ensure_ascii=False); ' +
               'print(h==hashlib.sha256(c.encode()).hexdigest())" package.json</pre>' +
             '</details>' +
           '</div>' +
-          '<div id="verify-out" class="verify-out"><div class="card empty-state"><p>Results appear here.</p><p class="hint">Try “Check untouched sample”, then “Check a changed field”.</p></div></div>' +
+          '<div id="verify-out" class="verify-out" role="region" aria-label="Verification result"><div class="card empty-state"><p>Results appear here.</p><p class="hint">Try “Check untouched sample”, then “Check a changed field”.</p></div></div>' +
         '</div>' +
       '</section>';
 
     var input = $('#pkg-input');
-    var run = function () { showVerification(input.value); };
-    $('#verify-btn').addEventListener('click', run);
-    $('#clear-btn').addEventListener('click', function () { input.value = ''; $('#verify-out').innerHTML = ''; });
+    // Keep the address in step with what is shown, without re-routing.
+    var setPreset = function (name) {
+      var want = name ? '#/verify/' + name : '#/verify';
+      if (location.hash !== want) history.replaceState(null, '', want);
+    };
+    var run = function (opts) { showVerification(input.value, opts); };
+    $('#verify-btn').addEventListener('click', function () { setPreset(null); run({ focus: true }); });
+    $('#clear-btn').addEventListener('click', function () {
+      setPreset(null);
+      input.value = '';
+      $('#verify-out').innerHTML = '';
+      input.focus();
+    });
     $$('[data-sample]').forEach(function (b) {
       b.addEventListener('click', function () {
-        input.value = JSON.stringify(SAMPLES.packages[b.getAttribute('data-sample')], null, 2);
-        run();
+        var name = b.getAttribute('data-sample');
+        setPreset(name);
+        input.value = JSON.stringify(ownSample(name), null, 2);
+        run({ focus: true });
       });
     });
     var readFile = function (file) {
       if (!file) return;
       var r = new FileReader();
-      r.onload = function () { input.value = String(r.result); run(); };
+      r.onload = function () { setPreset(null); input.value = String(r.result); run({ focus: true }); };
       r.readAsText(file);
     };
     $('#pkg-file').addEventListener('change', function (e) { readFile(e.target.files[0]); e.target.value = ''; });
-    input.addEventListener('dragover', function (e) { e.preventDefault(); input.classList.add('drop'); });
-    input.addEventListener('dragleave', function () { input.classList.remove('drop'); });
-    input.addEventListener('drop', function (e) {
-      e.preventDefault(); input.classList.remove('drop');
+    // A dropped file is caught anywhere on the page; dropped text goes into
+    // the box as usual.
+    var page = $('.page');
+    var hasFiles = function (e) { return e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') !== -1; };
+    page.addEventListener('dragover', function (e) { if (hasFiles(e)) { e.preventDefault(); input.classList.add('drop'); } });
+    page.addEventListener('dragleave', function (e) { if (!page.contains(e.relatedTarget)) input.classList.remove('drop'); });
+    page.addEventListener('drop', function (e) {
+      input.classList.remove('drop');
+      if (!hasFiles(e)) return;
+      e.preventDefault();
       readFile(e.dataTransfer.files[0]);
     });
 
-    if (preset && SAMPLES.packages[preset]) {
-      input.value = JSON.stringify(SAMPLES.packages[preset], null, 2);
-      run();
+    var sample = ownSample(preset);
+    if (sample) {
+      input.value = JSON.stringify(sample, null, 2);
+      run({ focus: false });
     }
   }
 
-  function showVerification(text) {
+  function showVerification(text, opts) {
     var out = $('#verify-out');
     out.innerHTML = '';
-    if (!text.trim()) { out.innerHTML = '<div class="card"><p class="fail-text">Paste a package first.</p></div>'; return; }
-    var r = A.verifyPackage(text);
-    if (!r.ok) { out.innerHTML = '<div class="card verdict fail"><h2>Cannot check</h2><p>' + esc(r.error) + '</p></div>'; return; }
-    try {
-      out.innerHTML = verificationHtml(r);
-    } catch (e) {
-      out.innerHTML = '<div class="card verdict fail"><h2>Cannot display this file</h2><p>' + esc(e.message) + '</p></div>';
+    var html;
+    if (!text.trim()) {
+      html = '<div class="card"><p class="fail-text" tabindex="-1">Paste a package first.</p></div>';
+    } else {
+      var r = A.verifyPackage(text);
+      if (!r.ok) {
+        html = '<div class="card verdict fail"><h2 tabindex="-1">Cannot check</h2><p>' + esc(r.error) + '</p></div>';
+      } else {
+        try {
+          html = verificationHtml(r);
+        } catch (e) {
+          html = '<div class="card verdict fail"><h2 tabindex="-1">Cannot display this file</h2><p>' + esc(e.message) + '</p></div>';
+        }
+      }
+    }
+    out.innerHTML = html;
+    var first = out.querySelector('[tabindex="-1"]');
+    if (first) announce(first.textContent);
+    // Bring the result into view (on a phone it sits below the input).
+    if (opts && opts.focus && first) {
+      first.focus({ preventScroll: true });
+      out.scrollIntoView({ block: 'start', behavior: reducedMotion() ? 'auto' : 'smooth' });
     }
   }
 
@@ -1060,12 +1116,27 @@
       return list.map(function (p) { return (p.seq && !/^Line /.test(p.message) ? 'Line ' + p.seq + ': ' : '') + p.message; }).join(' ');
     };
 
+    // The headline covers every check, not only the hash.
+    var failed = [];
+    if (!r.hash.pass) failed.push('the hash');
+    if (r.checked) {
+      if (!r.chain.pass) failed.push('the event chain');
+      if (!r.rules.pass) failed.push('the event rules');
+      if (!r.consistency.pass) failed.push('the outline check');
+    }
+    var state = !r.hash.pass ? 'fail' : !r.checked ? 'na' : r.consistent ? 'pass' : 'fail';
+    var label = state === 'pass' ? 'PASS' : state === 'na' ? 'NOT CHECKED' : 'FAIL';
+    var headline = !r.hash.pass
+      ? 'Changed. The recomputed hash does not match the hash written into the file.'
+      : state === 'na'
+        ? 'The hash matches, but this verifier cannot check the rest of a file in this format.'
+        : r.consistent
+          ? 'Every check passed: the hash matches and the file agrees with its sealed events (origin not checked).'
+          : 'The hash matches, but ' + joinList(failed) + ' failed. The file was probably changed and its hash rewritten.';
     var verdict =
-      '<div class="card verdict ' + (r.hash.pass ? 'pass' : 'fail') + '">' +
-        '<p class="verdict-label">' + (r.hash.pass ? 'PASS' : 'FAIL') + '</p>' +
-        '<h2>' + (r.hash.pass
-          ? 'Hash matches the file (origin not checked). The file was not changed after this hash was written into it.'
-          : 'Changed. The recomputed hash does not match the hash written into the file.') + '</h2>' +
+      '<div class="card verdict ' + state + '">' +
+        '<p class="verdict-label">' + label + '</p>' +
+        '<h2 tabindex="-1">' + esc(headline) + '</h2>' +
         '<dl class="kv hashes"><dt>In the file</dt><dd><code class="hash full">' + esc(r.hash.stated) + '</code></dd>' +
         '<dt>Recomputed</dt><dd><code class="hash full">' + esc(r.hash.recomputed) + '</code></dd>' +
         '<dt>Canonical form</dt><dd>' + r.canonicalLength.toLocaleString() + ' characters, ' + esc(A.HASH_FIELD) + ' excluded</dd></dl>' +
@@ -1075,16 +1146,9 @@
     // states; the file's own claim is shown only when they differ.
     var derived = r.checked ? r.status.derived : null;
     var shown = derived || pkg.status;
-    var label = shown === 'issued' ? 'Issued' : 'Draft package';
+    var statusLabel = shown === 'issued' ? 'Issued' : 'Draft package';
     var scope = !r.checked ? ' (as stated in the file; not checked)'
       : r.asOf.seq ? ' as of line ' + r.asOf.seq : ' (the file has no lines)';
-    var failed = [];
-    if (!r.hash.pass) failed.push('the hash');
-    if (r.checked) {
-      if (!r.chain.pass) failed.push('the event chain');
-      if (!r.rules.pass) failed.push('the event rules');
-      if (!r.consistency.pass) failed.push('the outline re-derivation');
-    }
     var concerns = (r.concerns || []).slice();
     if (r.checked && !r.rules.pass) {
       concerns.push({ code: 'RULES_NOT_MET', text: r.rules.problems.length + ' problem' + (r.rules.problems.length === 1 ? '' : 's') +
@@ -1092,11 +1156,11 @@
     }
     var status =
       '<div class="card status-card ' + (shown === 'issued' && r.consistent ? '' : 'concern') + '">' +
-        '<h3>Package status: ' + esc(label + scope) + ' · ' + esc(faceLabel(pkg.face)) + ' face</h3>' +
+        '<h3>Package status: ' + esc(statusLabel + scope) + ' · ' + esc(faceLabel(pkg.face)) + ' face</h3>' +
         (derived && pkg.status !== derived
           ? '<p class="fail-text">The file says ' + esc(JSON.stringify(pkg.status)) + '; its events support ' + esc(JSON.stringify(derived)) + '.</p>' : '') +
         (failed.length
-          ? '<p class="fail-text">Do not rely on this status: ' + esc(failed.join(', ')) + ' failed.</p>' : '') +
+          ? '<p class="fail-text">Do not rely on this status. Failed: ' + esc(joinList(failed)) + '.</p>' : '') +
         (r.checked
           ? '<p class="hint">This file shows the record up to line ' + esc(r.asOf.seq) + (r.asOf.head ? ' (chain head ' + hashSpan(r.asOf.head, 10) + ')' : '') +
             '. It cannot show anything sealed after that line.</p>' +
@@ -1104,46 +1168,53 @@
               ? '<ul class="concerns">' + concerns.map(function (c) { return '<li><strong>' + esc(c.code) + '</strong> ' + esc(c.text) + '</li>'; }).join('') + '</ul>'
               : '<p class="hint">No concerns derived from the events.</p>')
           : '<p class="hint">' + esc(r.reason) + '</p>') +
-        (pkg.notice ? '<p class="hint">' + esc(pkg.notice) + ' ' + esc(pkg.scope || '') + '</p>' : '') +
+        // Always the app's own words, never the file's.
+        '<p class="hint">' + esc(A.NOTICE + ' ' + A.SCOPE) + '</p>' +
       '</div>';
 
+    var diffs = r.checked && r.consistency.diffs ? r.consistency.diffs : [];
+    var diffTable = diffs.length
+      ? '<table class="diffs"><thead><tr><th>Field</th><th>In the file</th><th>From the events</th></tr></thead><tbody>' +
+        diffs.slice(0, MAX_ROWS).map(function (d) {
+          return '<tr><td><code>' + esc(d.path) + '</code></td><td class="fail-text">' + esc(d.stated) + '</td><td>' + esc(d.derived) + '</td></tr>';
+        }).join('') + '</tbody></table>' +
+        (diffs.length > MAX_ROWS ? '<p class="hint">And ' + (diffs.length - MAX_ROWS).toLocaleString() + ' more differing fields not shown.</p>' : '')
+      : '';
     var items;
     if (r.checked) {
       var count = Array.isArray(pkg.events) ? pkg.events.length : 0;
       items =
         checkItem(r.chain.pass, 'Event chain', r.chain.pass
           ? count + ' events; each hash recomputes and links to the line before it.'
-          : lineProblems(r.chain.problems)) +
+          : lineProblems(r.chain.problems.slice(0, MAX_ROWS))) +
         checkItem(r.rules.pass, 'Events follow the rules', r.rules.pass
           ? 'Each line was replayed against the envelope, order and payload rules: known event types only, in a valid order, with valid fields and seal times.'
-          : lineProblems(r.rules.problems)) +
+          : lineProblems(r.rules.problems.slice(0, MAX_ROWS))) +
         checkItem(r.consistency.pass, 'Outline matches the events', r.consistency.pass
-          ? 'Outline, cover sheet, concerns and status all re-derive from the sealed events.'
-          : r.consistency.error || 'These fields differ from what the sealed events say:');
+          ? 'Outline, cover sheet, concerns, status and the fixed notice all re-derive from the sealed events.'
+          : r.consistency.error || 'These fields differ from what the sealed events say:', diffTable);
     } else {
       items = checkItem(null, 'Event chain, rules and outline', r.reason);
     }
     items += checkItem(null, 'Origin', r.origin.text);
 
-    var diffs = r.checked && r.consistency.diffs ? r.consistency.diffs : [];
     var checks =
       '<div class="card">' +
         '<h3>Further checks</h3>' +
         '<ul class="checks">' + items + '</ul>' +
-        (diffs.length ? '<table class="diffs"><thead><tr><th>Field</th><th>In the file</th><th>From the events</th></tr></thead><tbody>' +
-          diffs.map(function (d) {
-            return '<tr><td><code>' + esc(d.path) + '</code></td><td class="fail-text">' + esc(d.stated) + '</td><td>' + esc(d.derived) + '</td></tr>';
-          }).join('') + '</tbody></table>' : '') +
       '</div>';
 
     return verdict + status + checks + outlineView(pkg, r.consistent);
   }
 
-  // pass: true, false, or null for "not checked".
-  function checkItem(pass, title, text) {
+  // pass: true, false, or null for "not checked". `more` is trusted HTML
+  // shown under the text (the field-difference table).
+  function checkItem(pass, title, text, more) {
     var cls = pass === null ? 'na' : pass ? 'pass' : 'fail';
     var mark = pass === null ? '–' : pass ? '✓' : '✕';
-    return '<li class="' + cls + '"><span class="mark">' + mark + '</span><div><strong>' + esc(title) + '</strong><p>' + esc(text) + '</p></div></li>';
+    var word = pass === null ? 'Not checked' : pass ? 'Passed' : 'Failed';
+    return '<li class="' + cls + '"><span class="mark" aria-hidden="true">' + mark + '</span><div><strong>' + esc(title) +
+      ' <span class="sr-only">(' + word + ')</span></strong><p>' + esc(text) + '</p>' + (more || '') + '</div></li>';
   }
 
   // Shows the outline as written in the file; every value is escaped and
@@ -1158,14 +1229,16 @@
     };
     var source = obj(o.source), inp = obj(o.inputs), dat = obj(o.data), vali = obj(o.validation), na = obj(o.named_approval), bb = obj(o.batch_binding);
     var src = source ? kv([['AI system', source.ai_system], ['Version', source.version], ['Artifact hash', hashSpan(source.artifact_hash, 16), true]]) : none;
-    var modList = Array.isArray(o.modifications) ? o.modifications.filter(obj) : [];
+    var allMods = Array.isArray(o.modifications) ? o.modifications.filter(obj) : [];
+    var modList = allMods.slice(0, MAX_ROWS);
     var mods = modList.length
       ? '<ul class="mods">' + modList.map(function (m) {
           var spec = typeof m.field === 'string' && Object.prototype.hasOwnProperty.call(A.CORRECTABLE, m.field) ? A.CORRECTABLE[m.field] : { label: String(m.field) };
           var fmt = function (v) { return spec.isHash ? hashSpan(v, 10) : esc(v); };
           return '<li><strong>Line ' + esc(m.seq) + '</strong> · ' + esc(spec.label) + ': ' + fmt(m.previous) + ' → ' + fmt(m.value) +
             '<br><span class="muted">' + esc(m.reason) + (m.autogenic_reference ? ' (' + esc(m.autogenic_reference) + ')' : '') + '</span></li>';
-        }).join('') + '</ul>'
+        }).join('') + '</ul>' +
+        (allMods.length > MAX_ROWS ? '<p class="hint">And ' + (allMods.length - MAX_ROWS).toLocaleString() + ' more not shown.</p>' : '')
       : '<p class="hint">No corrections.</p>';
     var inputs = inp ? kv([['Model inputs', inp.description]]) : none;
     var data = dat ? kv([['Snapshot hash', hashSpan(dat.snapshot_hash, 16), true]]) : none;
@@ -1174,7 +1247,7 @@
       ? kv([['Person', asEntered(na.person), true], ['Role', na.role], ['Time', fmtTime(na.approved_at)], ['Intended use', na.intended_use]])
       : '<p class="concern-text">Missing. No current “Approved for use” event. This is a concern for the evaluator.</p>';
     var bind = bb
-      ? kv([['Project', bb.project_name], ['Project / facility id', bb.project_id], ['Protocol', bb.protocol],
+      ? kv([['Project', bb.project_name], ['Project / facility id', bb.project_id], ['Registry face', faceLabel(bb.registry_face)], ['Protocol', bb.protocol],
           ['Batch / period', bb.batch], ['Bound at', 'line ' + bb.bound_at_seq], ['Registered line hash', hashSpan(bb.registered_event_hash, 10), true]])
       : none;
     var cover = kv(Object.keys(cs).filter(function (k) { return k !== 'face'; }).map(function (k) {

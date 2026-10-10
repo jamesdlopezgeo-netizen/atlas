@@ -425,3 +425,47 @@ test('a Correction without previous no longer causes a false outline mismatch', 
   assert.deepStrictEqual(r.consistency.diffs, []);
   assert.ok(r.rules.problems.some((p) => /Previous value is missing/.test(p.message)));
 });
+
+/* ---- App review batch 3: Verify trust ---- */
+
+test('fixed text in a package (notice, scope, status note, hash rule) is checked, not echoed', () => {
+  for (const [field, value] of [['notice', 'Registry submission.'], ['scope', 'allocycle scored this credit.'], ['status_note', 'Issued.'], ['hash_rule', 'MD5']]) {
+    const pkg = JSON.parse(sample('unapproved'));
+    pkg[field] = value;
+    pkg.package_hash = A.packageHash(pkg);
+    const r = A.verifyPackage(pkg);
+    assert.ok(r.hash.pass && !r.consistent, field);
+    assert.ok(r.consistency.diffs.some((d) => d.path === field), field);
+  }
+  const bad = JSON.parse(sample('issued'));
+  bad.face = 'gold';
+  bad.package_hash = A.packageHash(bad);
+  assert.ok(A.verifyPackage(bad).consistency.diffs.some((d) => d.path === 'face'));
+});
+
+test('the status note gives the reason for a draft that has a current approval', () => {
+  const ev = chain([[A.EVENT.REGISTERED, REG], [A.EVENT.VALIDATED, VAL], [A.EVENT.APPROVED, APPR]]);
+  const pkg = pkgOf(ev);
+  assert.strictEqual(pkg.status, 'draft');
+  assert.deepStrictEqual(pkg.concerns, []);
+  assert.match(pkg.status_note, /current "Approved for use" event \(line 3\), but no Package issued event for this face/);
+  assert.ok(A.verifyPackage(JSON.stringify(pkg)).consistent);
+});
+
+test('package_hash is compared exactly as written, like the Python check', () => {
+  for (const mutate of [(h) => 'sha256:' + h, (h) => h.toUpperCase(), (h) => ' ' + h]) {
+    const pkg = JSON.parse(sample('issued'));
+    pkg.package_hash = mutate(pkg.package_hash);
+    assert.strictEqual(A.verifyPackage(pkg).hash.pass, false);
+  }
+});
+
+test('verifyPackage never throws, even on deeply nested input', () => {
+  let deep = []; for (let i = 0; i < 20000; i++) deep = [deep];
+  const pkg = JSON.parse(sample('issued'));
+  pkg.events[0].seq = deep;
+  pkg.format = deep;
+  const r = A.verifyPackage(pkg);
+  assert.ok(r && typeof r === 'object');
+  assert.ok(r.ok === false || r.hash);
+});
